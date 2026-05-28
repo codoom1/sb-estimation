@@ -1,0 +1,22 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+.DS_Store
+
+# Keep only the data inputs actually used by the analysis in version control.
+data/*
+!data/top_level_data/
+!data/top_level_data/**
+data/top_level_data/**/.DS_Store
+!data/nosleep_data.csv.gz
+!data/wrist_df.csv.gz
+!data/sleep_est_data.csv.gz
+!data/self-sleep-2011-12.xpt
+!data/self-sleep-2013-14.xpt
+
+# renv package libraries can be restored from renv.lock
+renv/library/
+renv/staging/
+lme4/
+docs/
