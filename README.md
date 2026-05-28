@@ -48,3 +48,11 @@ Rscript -e "rmarkdown::render('analysis.Rmd')"
 - The rendered manuscript HTML is stored as `manuscript_main.html` for convenience.
 - Figures are written to `figures/` and tables/text outputs are written to `outputs/`.
 - The repository uses `renv` to keep package versions consistent across machines.
+
+## Related Repository
+
+Readers interested in how the analysis inputs were generated and summarized can find the top-level Python preprocessing workflow here: [SedentaryBproject](https://github.com/codoom1/SedentaryBproject). That repository contains the CHAP and SWaN processing steps used to create the summary data consumed by this manuscript project.
+
+## License
+
+This repository is released under the Apache License 2.0. See [LICENSE](LICENSE) for the full text.
