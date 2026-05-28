@@ -3,6 +3,7 @@
 .RData
 .Ruserdata
 .DS_Store
+manuscript_main.html
 
 # Keep only the data inputs actually used by the analysis in version control.
 data/*
