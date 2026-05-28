@@ -19,14 +19,14 @@ This repository provides the manuscript source, analysis notebooks, reusable R s
 
 ## Data Included In The Repo
 
-The repository retains the data files required by the manuscript workflow, including:
+The repository retains the data files required by the manuscript workflow so readers can reproduce the summary tables, figures, and cutoff calibration used in the paper. Each dataset serves a different part of the analysis:
 
-- `data/nosleep_data.csv.gz`
-- `data/wrist_df.csv.gz`
-- `data/sleep_est_data.csv.gz`
-- `data/self-sleep-2011-12.xpt`
-- `data/self-sleep-2013-14.xpt`
-- `data/top_level_data/` - CHAP, SWaN, and raw accelerometer inputs used by the preprocessing figure workflow
+- `data/nosleep_data.csv.gz` contains the hip-worn sedentary-time summaries used for the comparison analyses and for manuscript tables that contrast hip and wrist estimates.
+- `data/wrist_df.csv.gz` contains the wrist-worn sedentary-time summaries used as the main exposure source for the waking sedentary analyses.
+- `data/sleep_est_data.csv.gz` contains the hourly sleep and non-wear summaries used to identify hours excluded by the 91% sleep/non-wear rule.
+- `data/self-sleep-2011-12.xpt` contains the self-reported sleep data for the 2011-2012 NHANES cycle, used for calibration and validation of the sleep threshold.
+- `data/self-sleep-2013-14.xpt` contains the self-reported sleep data for the 2013-2014 NHANES cycle, used alongside the 2011-2012 cycle to support pooled analyses.
+- `data/top_level_data/` contains the raw ActiGraph, CHAP, and SWaN files used to build the preprocessing workflow figure and the top-level summary data. These files show how the raw accelerometer signal was converted into the analysis-ready CHAP and SWaN summaries used throughout the manuscript.
 
 ## Reproducing The Manuscript
 
@@ -52,6 +52,10 @@ Rscript -e "rmarkdown::render('analysis.Rmd')"
 ## Related Repository
 
 Readers interested in how the analysis inputs were generated and summarized can find the top-level Python preprocessing workflow here: [SedentaryBproject](https://github.com/codoom1/SedentaryBproject). That repository contains the CHAP and SWaN processing steps used to create the summary data consumed by this manuscript project.
+
+## Citation
+
+Citation details for the manuscript will be added here when the paper is published.
 
 ## License
 
