@@ -49,6 +49,12 @@ Rscript -e "rmarkdown::render('analysis.Rmd')"
 - Figures are written to `figures/` and tables/text outputs are written to `outputs/`.
 - The repository uses `renv` to keep package versions consistent across machines.
 
+## Featured Figure
+
+![Preprocessing workflow figure](figures/fig1.png)
+
+This figure summarizes the preprocessing workflow used in the manuscript, including the raw accelerometer signal, CHAP and SWaN classification summaries, and the 91% sleep/non-wear cutoff used to define waking sedentary time.
+
 ## Related Repository
 
 Readers interested in how the analysis inputs were generated and summarized can find the top-level Python preprocessing workflow here: [SedentaryBproject](https://github.com/codoom1/SedentaryBproject). That repository contains the CHAP and SWaN processing steps used to create the summary data consumed by this manuscript project.
