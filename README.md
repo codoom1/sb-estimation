@@ -45,7 +45,6 @@ Rscript -e "rmarkdown::render('analysis.Rmd')"
 
 ## Outputs
 
-- The rendered manuscript HTML is stored as `manuscript_main.html` for convenience.
 - Figures are written to `figures/` and tables/text outputs are written to `outputs/`.
 - The repository uses `renv` to keep package versions consistent across machines.
 
