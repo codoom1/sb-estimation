@@ -48,6 +48,17 @@ Rscript -e "rmarkdown::render('analysis.Rmd')"
 - Figures are written to `figures/` and tables/text outputs are written to `outputs/`.
 - The repository uses `renv` to keep package versions consistent across machines.
 
+## Manuscript Tables And Figures
+
+- **Table 1** summarizes the analytic sample and wear-day distribution by NHANES cycle, showing how many participants contributed valid wear days across 2011-2012 and 2013-2014.
+- **Table 2** compares sedentary-time estimates across studies, measurement methods, datasets, and populations so readers can place the manuscript results in context.
+- **Table 3** reports survey-weighted mean sedentary time by age and gender, highlighting how waking sedentary time varies across demographic groups.
+- **Table 4** reports survey-weighted mean sedentary time by race/ethnicity and BMI category, showing how the estimates differ across body composition and population strata.
+- **Figure 1** shows the preprocessing workflow from raw 80 Hz accelerometer data to CHAP and SWaN summaries and the hourly sleep/non-wear cutoff logic used to define waking sedentary time.
+- **Figure 2** presents survey-weighted hourly sedentary patterns by day type before and after sleep exclusion, comparing CHAP-predicted sitting with waking sedentary estimates.
+- **Figure 3** shows how participants are distributed across mean daily waking sedentary-time categories and how those categories map to the 24-hour behavioral composition of sedentary time, sleep/non-wear, and other waking time.
+- **Figure 4** shows sleep-cutoff calibration and sedentary-time sensitivity across candidate thresholds, with the 91% cutoff marked as the selected rule.
+
 ## Featured Figure
 
 ![Preprocessing workflow figure](figures/fig1.png)
