@@ -12,7 +12,7 @@ find_project_root <- function(start = getwd()) {
   current <- normalizePath(start, winslash = "/", mustWork = TRUE)
   repeat {
     if (
-      dir.exists(file.path(current, "data", "top_level_data")) &&
+      dir.exists(file.path(current, "data", "top_level_data_1h_epoch")) &&
         dir.exists(file.path(current, "figures"))
     ) {
       return(current)
@@ -20,14 +20,14 @@ find_project_root <- function(start = getwd()) {
 
     parent <- dirname(current)
     if (identical(parent, current)) {
-      stop("Could not find project root containing data/top_level_data and figures.")
+      stop("Could not find project root containing data/top_level_data_1h_epoch and figures.")
     }
     current <- parent
   }
 }
 
 root <- find_project_root()
-data_dir <- file.path(root, "data", "top_level_data")
+data_dir <- file.path(root, "data", "top_level_data_1h_epoch")
 fig_dir <- file.path(root, "figures")
 
 raw_path <- file.path(data_dir, "raw80HZ_83724_data", "2000-01-12.csv")

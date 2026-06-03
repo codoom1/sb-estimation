@@ -21,12 +21,12 @@ This repository provides the manuscript source, analysis notebooks, reusable R s
 
 The repository retains the data files required by the manuscript workflow so readers can reproduce the summary tables, figures, and cutoff calibration used in the paper. Each dataset serves a different part of the analysis:
 
-- `data/nosleep_data.csv.gz` contains the hip-worn sedentary-time summaries used for the comparison analyses and for manuscript tables that contrast hip and wrist estimates.
-- `data/wrist_df.csv.gz` contains the wrist-worn sedentary-time summaries used as the main exposure source for the waking sedentary analyses.
-- `data/sleep_est_data.csv.gz` contains the hourly sleep and non-wear summaries used to identify hours excluded by the 91% sleep/non-wear rule.
+- `data/analysis_ready_1h_epoch/nosleep_data.csv.gz` contains the hip-worn sedentary-time summaries used for the comparison analyses and for manuscript tables that contrast hip and wrist estimates.
+- `data/analysis_ready_1h_epoch/wrist_df.csv.gz` contains the wrist-worn 1-hour sitting summaries used as the main exposure source for the waking sedentary analyses.
+- `data/analysis_ready_1h_epoch/sleep_est_data.csv.gz` contains the 1-hour sleep and non-wear summaries used to identify records excluded by the calibrated sleep/non-wear rule.
 - `data/self-sleep-2011-12.xpt` contains the self-reported sleep data for the 2011-2012 NHANES cycle, used for calibration and validation of the sleep threshold.
 - `data/self-sleep-2013-14.xpt` contains the self-reported sleep data for the 2013-2014 NHANES cycle, used alongside the 2011-2012 cycle to support pooled analyses.
-- `data/top_level_data/` contains the raw ActiGraph, CHAP, and SWaN files used to build the preprocessing workflow figure and the top-level summary data. These files show how the raw accelerometer signal was converted into the analysis-ready CHAP and SWaN summaries used throughout the manuscript.
+- `data/top_level_data_1h_epoch/` contains the upstream raw ActiGraph, CHAP, and SWaN example files used to build the preprocessing workflow figure for the current 1-hour summary analysis. Epoch-specific upstream folders can be added alongside it for future sensitivity analyses, such as 30-second or 1-minute summaries.
 
 ## Reproducing The Manuscript
 

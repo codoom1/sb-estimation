@@ -32,12 +32,12 @@ library(survey)
 ```{r Load sedentary and sleep data, echo=FALSE, warning=FALSE}
 
 ## Load near sedentary (no sleep data) time data
-sedentary_hip_df <- read_csv('data/nosleep_data.csv.gz')
+sedentary_hip_df <- read_csv('data/analysis_ready_1h_epoch/nosleep_data.csv.gz')
 
-sedentary_wrist_df <- read_csv('data/wrist_df.csv.gz')
+sedentary_wrist_df <- read_csv('data/analysis_ready_1h_epoch/wrist_df.csv.gz')
 
 ## Load sleep data
-sleep_df <- read_csv('data/sleep_est_data.csv.gz')
+sleep_df <- read_csv('data/analysis_ready_1h_epoch/sleep_est_data.csv.gz')
 
 
 ```
