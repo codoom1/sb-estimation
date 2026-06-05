@@ -28,7 +28,14 @@ find_project_root <- function(start = getwd()) {
 
 root <- find_project_root()
 data_dir <- file.path(root, "data", "top_level_data_1h_epoch")
-fig_dir <- file.path(root, "figures")
+workflow_fig_dir <- file.path(root, "figures", "workflow")
+manuscript_fig_dir <- file.path(root, "figures", "manuscript")
+selected_cutoff_path <- file.path(root, "outputs", "cutoff", "selected_cutoff.csv")
+selected_sleep_cutoff <- 91
+
+if (file.exists(selected_cutoff_path)) {
+  selected_sleep_cutoff <- read_csv(selected_cutoff_path, show_col_types = FALSE)$cutoff[1]
+}
 
 raw_path <- file.path(data_dir, "raw80HZ_83724_data", "2000-01-12.csv")
 chap_path <- file.path(data_dir, "CHAP_pred83724_data", "2000-01-12.csv")
@@ -130,7 +137,7 @@ hourly_summaries <- function(chap, swan) {
     left_join(sitting, by = "hour") %>%
     left_join(sleep_nonwear, by = "hour") %>%
     mutate(
-      included = percent_sleep_nonwear < 91,
+      included = percent_sleep_nonwear < selected_sleep_cutoff,
       waking_sedentary = ifelse(included, percent_sitting, NA_real_)
     )
 }
@@ -143,7 +150,7 @@ make_panel_a <- function(panel_label = "A") {
       "CHAP posture\n10-s windows",
       "SWaN\n30-s windows",
       "Hourly dataset\n% sitting + % sleep/nonwear",
-      "Waking SB\n91% rule"
+      "Waking SB\nselected rule"
     ),
     x = c(0.09, 0.31, 0.31, 0.60, 0.88),
     y = c(0.50, 0.72, 0.28, 0.50, 0.50),
@@ -313,9 +320,9 @@ make_panel_d <- function(summary_df, panel_label = "D") {
     geom_point(aes(y = percent_sleep_nonwear), color = "purple", size = 3.9, shape = 15, na.rm = TRUE) +
     geom_line(aes(y = waking_sedentary), color = BLUE, linewidth = 2.35, na.rm = TRUE) +
     geom_point(aes(y = waking_sedentary), color = BLUE, size = 4.2, na.rm = TRUE) +
-    geom_hline(yintercept = 91, color = RED, linewidth = 1.35, linetype = "dashed") +
+    geom_hline(yintercept = selected_sleep_cutoff, color = RED, linewidth = 1.35, linetype = "dashed") +
     annotate("text", x = 16.8, y = 14, label = "sleep/nonwear", color = "purple", size = 4.8, fontface = "bold", hjust = 0) +
-    annotate("text", x = 13, y = 77, label = "91% cutoff", color = RED, size = 4.8, fontface = "bold", hjust = 1, vjust = -0.35) +
+    annotate("text", x = 13, y = 77, label = paste0(round(selected_sleep_cutoff, 1), "% cutoff"), color = RED, size = 4.8, fontface = "bold", hjust = 1, vjust = -0.35) +
     annotate("text", x = 19, y = 70, label = "waking sedentary", color = BLUE, size = 5.0, fontface = "bold", hjust = 1) +
     annotate("text", x = 0.25, y = 9, label = "shaded hours excluded", color = RED, size = 4.7, fontface = "bold", hjust = 0) +
     scale_x_continuous(breaks = seq(0, 24, 4), limits = c(0, 24.5), expand = expansion(mult = c(0, 0))) +
@@ -349,13 +356,14 @@ fig_three_panel <- wrap_plots(
   heights = c(1.05, 0.9, 1.05)
 )
 
-dir.create(fig_dir, showWarnings = FALSE, recursive = TRUE)
-png_path <- file.path(fig_dir, "preprocessing_workflow_figure.png")
-pdf_path <- file.path(fig_dir, "preprocessing_workflow_figure.pdf")
-three_panel_png_path <- file.path(fig_dir, "preprocessing_workflow_figure_three_panel.png")
-three_panel_pdf_path <- file.path(fig_dir, "preprocessing_workflow_figure_three_panel.pdf")
-fig1_png_path <- file.path(fig_dir, "fig1.png")
-fig1_pdf_path <- file.path(fig_dir, "fig1.pdf")
+dir.create(workflow_fig_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(manuscript_fig_dir, showWarnings = FALSE, recursive = TRUE)
+png_path <- file.path(workflow_fig_dir, "preprocessing_workflow_figure.png")
+pdf_path <- file.path(workflow_fig_dir, "preprocessing_workflow_figure.pdf")
+three_panel_png_path <- file.path(workflow_fig_dir, "preprocessing_workflow_figure_three_panel.png")
+three_panel_pdf_path <- file.path(workflow_fig_dir, "preprocessing_workflow_figure_three_panel.pdf")
+fig1_png_path <- file.path(manuscript_fig_dir, "fig1.png")
+fig1_pdf_path <- file.path(manuscript_fig_dir, "fig1.pdf")
 
 ggsave(png_path, plot = fig, width = 11, height = 12.5, units = "in", dpi = 600, bg = "white")
 ggsave(pdf_path, plot = fig, width = 11, height = 12.5, units = "in", bg = "white")

@@ -1,0 +1,1620 @@
+---
+title: "Reproducible Manuscript Outputs"
+author: "Christopher Odoom"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 2
+    highlight: null
+  html_document:
+    toc: true
+    toc_depth: 2
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  error = FALSE,
+  fig.align = "center",
+  size = "scriptsize"
+)
+
+default_source_hook <- knitr::knit_hooks$get("source")
+knitr::knit_hooks$set(
+  source = function(x, options) {
+    code_block <- default_source_hook(x, options)
+
+    if (knitr::is_latex_output()) {
+      ""
+    } else if (knitr::is_html_output() && !identical(options$code_dropdown, FALSE)) {
+      paste0(
+        "<details class=\"code-details\"><summary>Code</summary>\n",
+        code_block,
+        "\n</details>"
+      )
+    } else {
+      code_block
+    }
+  }
+)
+
+dir.create("figures", showWarnings = FALSE)
+dir.create("figures/manuscript", recursive = TRUE, showWarnings = FALSE)
+dir.create("figures/workflow", recursive = TRUE, showWarnings = FALSE)
+dir.create("figures/diagnostics", recursive = TRUE, showWarnings = FALSE)
+dir.create("figures/exploratory", recursive = TRUE, showWarnings = FALSE)
+dir.create("outputs", showWarnings = FALSE)
+dir.create("outputs/tables", recursive = TRUE, showWarnings = FALSE)
+dir.create("outputs/results", recursive = TRUE, showWarnings = FALSE)
+dir.create("outputs/datasets", recursive = TRUE, showWarnings = FALSE)
+dir.create("outputs/documentation", recursive = TRUE, showWarnings = FALSE)
+dir.create("outputs/cutoff", recursive = TRUE, showWarnings = FALSE)
+dir.create("outputs/qc", recursive = TRUE, showWarnings = FALSE)
+dir.create("outputs/ids", recursive = TRUE, showWarnings = FALSE)
+```
+
+```{=html}
+<style>
+.code-details {
+  border: 1px solid #d8dee9;
+  border-radius: 6px;
+  background: #f8fafc;
+  margin: 1rem 0;
+}
+.code-details summary {
+  cursor: pointer;
+  font-weight: 700;
+  color: #243447;
+  padding: 0.55rem 0.75rem;
+  border-bottom: 1px solid #e6ebf2;
+}
+.code-details:not([open]) summary {
+  border-bottom: 0;
+}
+.code-details .sourceCode {
+  margin: 0;
+  border: 0;
+  border-radius: 0 0 6px 6px;
+}
+.code-details pre {
+  margin: 0;
+  white-space: pre-wrap;
+}
+</style>
+```
+
+```{=latex}
+\newcommand{\analysispagebreak}{\clearpage}
+```
+
+## Purpose
+
+This R Markdown file documents and reproduces the manuscript analysis for estimating waking sedentary time in NHANES 2011-2014 wrist accelerometer data. The project combines posture predictions from the CHAP wrist model with sleep/nonwear information from SWaN to estimate each participant's usual daily waking sedentary time.
+
+The main goal is to produce survey-weighted, nationally representative estimates of waking sedentary time after excluding sleep/nonwear periods. The analysis first calibrates a sleep/nonwear percentage cutoff against NHANES self-reported sleep duration, then applies the selected cutoff at the native analysis epoch, summarizes sedentary time to the participant level, and estimates overall and subgroup means using the NHANES survey design.
+
+This file is also designed as a reproducibility driver. It reads the analysis-ready accelerometer data, derives the analytic sample, recalibrates the sleep cutoff for the selected epoch resolution, generates tables and figures, and writes manuscript-ready outputs to `outputs/` and `figures/manuscript/`.
+
+The analysis can be rendered using either the 1-hour or 30-minute epoch data. Demographic and NHANES survey design variables are taken from `data/analysis_ready_1h_epoch/nosleep_data.csv.gz` for both epoch choices; the hip-based sedentary values in that file are used only as a metadata source and are not used as the primary sedentary behavior measure.
+
+## Packages
+
+```{r packages}
+library(dplyr)
+library(ggplot2)
+library(haven)
+library(knitr)
+library(patchwork)
+library(purrr)
+library(readr)
+library(scales)
+library(survey)
+library(tidyr)
+```
+
+```{r survey-options}
+options(survey.lonely.psu = "adjust")
+```
+
+```{r analysis-settings}
+analysis_epoch <- Sys.getenv("ANALYSIS_EPOCH", unset = "30m") # options: "1h", "30m"
+
+epoch_data_paths <- list(
+  "1h" = list(
+    wrist = "data/analysis_ready_1h_epoch/wrist_df.csv.gz",
+    sleep = "data/analysis_ready_1h_epoch/sleep_est_data.csv.gz"
+  ),
+  "30m" = list(
+    merged = "data/analysis_ready_30m_epoch/merged.csv.gz"
+  )
+)
+
+metadata_path <- "data/analysis_ready_1h_epoch/nosleep_data.csv.gz"
+
+if (!analysis_epoch %in% names(epoch_data_paths)) {
+  stop("analysis_epoch must be one of: ", paste(names(epoch_data_paths), collapse = ", "))
+}
+```
+
+## Analysis Configuration
+
+This render uses the `r analysis_epoch` epoch dataset. Sleep/nonwear removal is applied at the native epoch level before participant-day sedentary totals are calculated. For figures that display hourly patterns, the native epoch records are aggregated to hour only after the sleep/nonwear rule has been applied.
+
+The primary analytic unit is the NHANES participant. Epoch-level accelerometer records are used to construct participant-day and participant-level sedentary time summaries, but survey-weighted estimation is performed at the participant level to avoid giving participants with more records or more valid days disproportionate influence.
+
+## Load And Prepare Data
+
+```{r load-data}
+metadata_df <- read_csv(metadata_path, show_col_types = FALSE)
+
+if (analysis_epoch == "1h") {
+  sedentary_wrist_df <- read_csv(epoch_data_paths[[analysis_epoch]]$wrist, show_col_types = FALSE)
+  sleep_df <- read_csv(epoch_data_paths[[analysis_epoch]]$sleep, show_col_types = FALSE)
+} else if (analysis_epoch == "30m") {
+  merged_epoch_df <- read_csv(epoch_data_paths[[analysis_epoch]]$merged, show_col_types = FALSE)
+}
+```
+
+```{r prepare-epoch-data, results="hide"}
+metadata_df <- metadata_df %>%
+  rename(
+    Day = Date,
+    percent_sedentary_hip = PercentSedentary
+  ) %>%
+  filter(PartialDay != "Yes") %>%
+  mutate(
+    Exam_weight_recal = 0.5 * Exam_weight,
+    Dataset = if_else(Dataset == "2011-12", "2011-2012", "2013-2014")
+  )
+
+demo_unique <- metadata_df %>%
+  mutate(
+    Age_group = case_when(
+      is.na(Age) ~ NA_character_,
+      Age < 18 ~ "<18",
+      Age <= 34 ~ "18-34",
+      Age <= 44 ~ "35-44",
+      Age <= 64 ~ "45-64",
+      TRUE ~ ">=65"
+    ),
+    BMI = Weight / (Height / 100)^2,
+    BMI_cat = case_when(
+      is.na(BMI) ~ NA_character_,
+      BMI < 25 ~ "under/normal weight",
+      BMI < 30 ~ "overweight",
+      TRUE ~ "obesity"
+    )
+  ) %>%
+  group_by(ID) %>%
+  summarise(
+    Age_group = first(Age_group),
+    BMI_cat = first(BMI_cat),
+    Race = first(Race),
+    Gender = first(Gender),
+    Education = first(Education_coarse),
+    Marital_status = first(Marital_status),
+    Exam_weight_recal = first(Exam_weight_recal),
+    PSU = first(PSU),
+    Stratum = first(Stratum),
+    Dataset = first(Dataset),
+    .groups = "drop"
+  )
+
+if (analysis_epoch == "1h") {
+  sedentary_wrist_df <- sedentary_wrist_df %>%
+    rename(percent_sedentary_wrist = percent_sitting) %>%
+    select(ID, Day, Hour, percent_sedentary_wrist)
+
+  sleep_df <- sleep_df %>%
+    transmute(
+      ID,
+      Day,
+      Hour,
+      percent_sleep = percent_sleep_nonwear
+    )
+
+  sleep_sed_df <- inner_join(
+    x = sedentary_wrist_df,
+    y = sleep_df,
+    by = c("ID", "Day", "Hour")
+  ) %>%
+    left_join(
+      metadata_df %>%
+        select(ID, Day, Hour, DayType, Dataset) %>%
+        distinct(),
+      by = c("ID", "Day", "Hour")
+    ) %>%
+    mutate(
+      epoch = 1L,
+      epoch_duration_hours = 1
+    )
+} else if (analysis_epoch == "30m") {
+  sleep_sed_df <- merged_epoch_df %>%
+    transmute(
+      ID,
+      Dataset,
+      Day,
+      DayType,
+      Hour,
+      epoch,
+      epoch_duration_hours,
+      percent_sleep = percent_sleep_nonwear,
+      percent_sedentary_wrist = percent_sitting
+    )
+}
+
+sleep_sed_df <- sleep_sed_df %>%
+  left_join(
+    demo_unique %>%
+      select(ID, Exam_weight_recal, PSU, Stratum),
+    by = "ID"
+  ) %>%
+  filter(
+    !is.na(Exam_weight_recal),
+    !is.na(PSU),
+    !is.na(Stratum)
+  )
+
+epoch_validation <- list(
+  epoch = analysis_epoch,
+  n_participants = n_distinct(sleep_sed_df$ID),
+  records_by_cycle = count(sleep_sed_df, Dataset),
+  epoch_duration_counts = count(sleep_sed_df, epoch_duration_hours)
+)
+
+```
+
+## Reusable Functions
+
+```{r functions}
+add_epoch_duration <- function(df, default_epoch_duration_hours = 1) {
+  if (!"epoch_duration_hours" %in% names(df)) {
+    df <- df %>%
+      mutate(epoch_duration_hours = default_epoch_duration_hours)
+  } else {
+    df <- df %>%
+      mutate(epoch_duration_hours = replace_na(epoch_duration_hours, default_epoch_duration_hours))
+  }
+
+  df
+}
+
+compute_sedentary_by_cutoff <- function(df, cutoffs, default_epoch_duration_hours = 1) {
+  df <- add_epoch_duration(df, default_epoch_duration_hours)
+  id_days <- distinct(df, ID, Day)
+
+  map_dfr(cutoffs, function(cut) {
+    df %>%
+      filter(percent_sleep < cut) %>%
+      group_by(ID, Day) %>%
+      summarise(
+        total_sed_hours = sum((percent_sedentary_wrist / 100) * epoch_duration_hours, na.rm = TRUE),
+        wake_hours = sum(epoch_duration_hours, na.rm = TRUE),
+        n_epochs = n(),
+        .groups = "drop"
+      ) %>%
+      right_join(id_days, by = c("ID", "Day")) %>%
+      mutate(
+        total_sed_hours = replace_na(total_sed_hours, 0),
+        wake_hours = replace_na(wake_hours, 0),
+        n_epochs = replace_na(n_epochs, 0),
+        sleep_hrs = 24 - wake_hours,
+        cutoff = cut
+      )
+  })
+}
+
+get_svy_estimates <- function(data_cut) {
+  des <- svydesign(
+    id = ~PSU,
+    strata = ~Stratum,
+    weights = ~Exam_weight_recal,
+    nest = TRUE,
+    data = data_cut
+  )
+
+  sleep_est <- svymean(~mean_sleep_hours, des, na.rm = TRUE)
+  sed_est <- svymean(~mean_sed_hours, des, na.rm = TRUE)
+
+  tibble(
+    cutoff = unique(data_cut$cutoff),
+    sleep_mean = coef(sleep_est)[1],
+    sleep_se = SE(sleep_est)[1],
+    sed_mean = coef(sed_est)[1],
+    sed_se = SE(sed_est)[1]
+  )
+}
+
+get_svy_estimates_by_cutoff <- function(data) {
+  des <- svydesign(
+    id = ~PSU,
+    strata = ~Stratum,
+    weights = ~Exam_weight_recal,
+    nest = TRUE,
+    data = data
+  )
+
+  svyby(
+    ~mean_sleep_hours + mean_sed_hours,
+    ~cutoff,
+    des,
+    svymean,
+    na.rm = TRUE,
+    vartype = "se"
+  ) %>%
+    as_tibble() %>%
+    transmute(
+      cutoff,
+      sleep_mean = mean_sleep_hours,
+      sleep_se = se.mean_sleep_hours,
+      sed_mean = mean_sed_hours,
+      sed_se = se.mean_sed_hours
+    )
+}
+
+format_decimal <- function(x, digits = 4) {
+  format(round(x, digits), nsmall = digits, trim = TRUE)
+}
+
+format_text_decimals <- function(x, digits = 2) {
+  replace_one <- function(value) {
+    if (is.na(value)) {
+      return(value)
+    }
+
+    matches <- gregexpr("(?<![0-9])([0-9]+\\.[0-9]+)(?![0-9])", value, perl = TRUE)[[1]]
+    if (matches[1] == -1) {
+      return(value)
+    }
+
+    values <- regmatches(value, list(matches))[[1]]
+    regmatches(value, list(matches)) <- list(format_decimal(as.numeric(values), digits))
+    value
+  }
+
+  vapply(x, replace_one, character(1), USE.NAMES = FALSE)
+}
+
+format_render_table <- function(df, digits = 2) {
+  df %>%
+    mutate(
+      across(where(is.numeric), ~round(.x, digits)),
+      across(where(is.character), ~format_text_decimals(.x, digits))
+    )
+}
+
+format_export_numbers <- function(df) {
+  df %>%
+    mutate(
+      across(any_of(c("ID", "n_days", "PSU", "Stratum", "Hour", "epoch")), as.character),
+      across(where(is.numeric), ~format_decimal(.x, 4))
+    )
+}
+
+format_selected_numbers <- function(df, columns) {
+  df %>%
+    mutate(across(any_of(columns), ~format_decimal(.x, 4)))
+}
+
+render_path <- function(path) {
+  normalizePath(path, winslash = "/", mustWork = TRUE)
+}
+
+format_mean_ci <- function(design_obj, variable = "mean_sed_hours", digits = 4) {
+  m <- svymean(as.formula(paste0("~", variable)), design_obj, na.rm = TRUE)
+  ci <- confint(m)
+  sprintf(
+    paste0("%.", digits, "f (%.", digits, "f, %.", digits, "f)"),
+    coef(m)[1],
+    ci[1, 1],
+    ci[1, 2]
+  )
+}
+
+format_n_pct <- function(df, denominator) {
+  n <- n_distinct(df$ID)
+  paste0(comma(n), " (", format_decimal(100 * n / denominator), "%)")
+}
+
+aggregate_to_hour <- function(df) {
+  df %>%
+    add_epoch_duration() %>%
+    group_by(ID, Dataset, Day, DayType, Hour) %>%
+    summarise(
+      percent_sedentary_wrist = weighted.mean(
+        percent_sedentary_wrist,
+        w = epoch_duration_hours,
+        na.rm = TRUE
+      ),
+      percent_sleep = weighted.mean(
+        percent_sleep,
+        w = epoch_duration_hours,
+        na.rm = TRUE
+      ),
+      epoch_duration_hours = sum(epoch_duration_hours, na.rm = TRUE),
+      Exam_weight_recal = first(Exam_weight_recal),
+      PSU = first(PSU),
+      Stratum = first(Stratum),
+      .groups = "drop"
+    )
+}
+```
+
+```{=latex}
+\analysispagebreak
+```
+
+## Table 1
+
+Analytic sample and wear-day distribution by NHANES cycle (2011-2014).
+
+```{r table-1}
+df_days <- sleep_sed_df %>%
+  distinct(ID, Day, Dataset) %>%
+  group_by(ID, Dataset) %>%
+  summarise(n_days = n(), .groups = "drop")
+
+table_by_cycle <- df_days %>%
+  count(Dataset, n_days, name = "n") %>%
+  group_by(Dataset) %>%
+  mutate(
+    percent = 100 * n / sum(n),
+    value = paste0(comma(n), " (", format_decimal(percent), ")")
+  ) %>%
+  ungroup() %>%
+  select(n_days, Dataset, value) %>%
+  pivot_wider(names_from = Dataset, values_from = value)
+
+table_total <- df_days %>%
+  count(n_days, name = "n") %>%
+  mutate(
+    percent = 100 * n / sum(n),
+    `Total (2011-14)` = paste0(comma(n), " (", format_decimal(percent), ")")
+  ) %>%
+  select(n_days, `Total (2011-14)`)
+
+table1 <- table_by_cycle %>%
+  left_join(table_total, by = "n_days") %>%
+  arrange(n_days) %>%
+  mutate(n_days = as.character(n_days))
+
+sample_row <- df_days %>%
+  group_by(Dataset) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  mutate(value = paste0(comma(n), " (", format_decimal(100), ")")) %>%
+  select(Dataset, value) %>%
+  pivot_wider(names_from = Dataset, values_from = value) %>%
+  mutate(
+    n_days = "Sample Analyzed (1-7)",
+    `Total (2011-14)` = paste0(comma(nrow(df_days)), " (", format_decimal(100), ")")
+  )
+
+table1 <- bind_rows(table1, sample_row) %>%
+  select(
+    `Full days` = n_days,
+    `2011-2012`,
+    `2013-2014`,
+    `Total (2011-14)`
+  )
+
+write_csv(table1, "outputs/tables/table1_wear_day_distribution.csv")
+
+kable(
+  format_render_table(table1),
+  caption = "Analytic sample and wear-day distribution by NHANES cycle (2011-2014)."
+)
+```
+
+Notes: A full day is a 24-hour day represented by `r ifelse(analysis_epoch == "30m", "48 thirty-minute records", "24 hourly records")`; partial initiation/return days are excluded.
+
+## Cutoff Sensitivity Grid
+
+This step does not select the final sleep/non-wear cutoff. It evaluates a coarse grid of candidate cutoffs in 5-percentage-point increments to summarize how survey-weighted sleep duration and waking sedentary time change across plausible decision rules. The resulting `sensitivity_results` object is used for the cutoff-sensitivity display in Figure 4. The final cutoff is selected in the next step using a finer objective curve.
+
+```{r cutoff-sensitivity-grid, results="hide"}
+sensitivity_cutoffs <- seq(25, 100, 5)
+sensitivity_sed_all <- compute_sedentary_by_cutoff(sleep_sed_df, sensitivity_cutoffs)
+
+sensitivity_person_df <- sensitivity_sed_all %>%
+  group_by(ID, cutoff) %>%
+  summarise(
+    mean_sed_hours = mean(total_sed_hours, na.rm = TRUE),
+    mean_sleep_hours = mean(sleep_hrs, na.rm = TRUE),
+    .groups = "drop"
+) 
+
+sensitivity_model_df <- sensitivity_person_df %>%
+  left_join(demo_unique, by = "ID") %>%
+  mutate(mean_wake_hours = 24 - mean_sleep_hours) %>%
+  filter(
+    !is.na(Exam_weight_recal),
+    !is.na(PSU),
+    !is.na(Stratum)
+)
+
+sensitivity_results <- get_svy_estimates_by_cutoff(sensitivity_model_df)
+
+write_csv(format_export_numbers(sensitivity_results), "outputs/cutoff/cutoff_sensitivity_grid.csv")
+```
+
+```{r self-reported-sleep, results="hide"}
+sleep_2011_12 <- read_xpt("data/self-sleep-2011-12.xpt")
+sleep_2013_14 <- read_xpt("data/self-sleep-2013-14.xpt")
+
+self_sleep <- bind_rows(sleep_2011_12, sleep_2013_14) %>%
+  transmute(
+    ID = SEQN,
+    self_reported_slp_hrs = SLD010H
+  ) %>%
+  filter(
+    !is.na(self_reported_slp_hrs),
+    !(self_reported_slp_hrs %in% c(77, 99))
+  )
+
+self_sleep_weighted <- self_sleep %>%
+  left_join(
+    demo_unique %>% select(ID, Exam_weight_recal, PSU, Stratum),
+    by = "ID"
+  ) %>%
+  filter(!is.na(Exam_weight_recal))
+
+des_self_sleep <- svydesign(
+  id = ~PSU,
+  strata = ~Stratum,
+  weights = ~Exam_weight_recal,
+  nest = TRUE,
+  data = self_sleep_weighted
+)
+
+mean_self_sleep <- svymean(~self_reported_slp_hrs, design = des_self_sleep, na.rm = TRUE)
+self_sleep_mean <- as.numeric(coef(mean_self_sleep)[1])
+self_sleep_ci <- as.numeric(confint(mean_self_sleep)[1, ])
+```
+
+
+
+## Optimal Sleep Cutoff Selection
+
+The final sleep/non-wear cutoff is selected from a fine-resolution objective curve. For each candidate cutoff, the analysis compares survey-weighted accelerometer-derived sleep duration with the survey-weighted NHANES self-reported sleep benchmark. The selected cutoff is the value that minimizes the absolute difference between those two sleep-duration estimates. This fine-resolution selected cutoff, not the coarse sensitivity-grid cutoff, is used for the primary waking sedentary-time analysis.
+
+```{r optimal-cutoff, results="hide"}
+compute_person_for_cutoff <- function(cutoff_value, df = sleep_sed_df, default_epoch_duration_hours = 1) {
+  compute_sedentary_by_cutoff(
+    df = df,
+    cutoffs = cutoff_value,
+    default_epoch_duration_hours = default_epoch_duration_hours
+  ) %>%
+    group_by(ID, cutoff) %>%
+    summarise(
+      n_days = n(),
+      mean_sed_hours = mean(total_sed_hours, na.rm = TRUE),
+      sd_sed_hours = sd(total_sed_hours, na.rm = TRUE),
+      mean_sleep_hours = mean(sleep_hrs, na.rm = TRUE),
+      sd_sleep_hours = sd(sleep_hrs, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      person_t_crit = suppressWarnings(qt(0.975, df = n_days - 1)),
+      se_sed_hours = if_else(n_days > 1, sd_sed_hours / sqrt(n_days), NA_real_),
+      sed_ci_l = if_else(n_days > 1, mean_sed_hours - person_t_crit * se_sed_hours, NA_real_),
+      sed_ci_u = if_else(n_days > 1, mean_sed_hours + person_t_crit * se_sed_hours, NA_real_),
+      se_sleep_hours = if_else(n_days > 1, sd_sleep_hours / sqrt(n_days), NA_real_),
+      sleep_ci_l = if_else(n_days > 1, mean_sleep_hours - person_t_crit * se_sleep_hours, NA_real_),
+      sleep_ci_u = if_else(n_days > 1, mean_sleep_hours + person_t_crit * se_sleep_hours, NA_real_)
+    ) %>%
+    left_join(demo_unique, by = "ID") %>%
+    mutate(
+      mean_wake_hours = 24 - mean_sleep_hours,
+      se_wake_hours = se_sleep_hours,
+      wake_ci_l = 24 - sleep_ci_u,
+      wake_ci_u = 24 - sleep_ci_l
+    ) %>%
+    select(-person_t_crit) %>%
+    filter(
+      !is.na(Exam_weight_recal),
+      !is.na(PSU),
+      !is.na(Stratum)
+    )
+}
+
+get_sleep_mean_for_cutoff <- function(cutoff_value) {
+  below_cutoff <- findInterval(cutoff_value, sleep_values, left.open = TRUE)
+  wake_weighted_hours <- if (below_cutoff == 0) 0 else cumulative_epoch_weight[below_cutoff]
+  sleep_weighted_hours <- total_epoch_weight - wake_weighted_hours
+
+  sleep_weighted_hours / total_person_weight
+}
+
+get_sleep_diff_for_cutoff <- function(cutoff_value) {
+  abs(get_sleep_mean_for_cutoff(cutoff_value) - self_sleep_mean)
+}
+
+sleep_sed_epoch_df <- add_epoch_duration(sleep_sed_df)
+
+person_days <- sleep_sed_epoch_df %>%
+  distinct(ID, Day) %>%
+  count(ID, name = "n_days")
+
+valid_person_weights <- demo_unique %>%
+  left_join(person_days, by = "ID") %>%
+  filter(
+    !is.na(Exam_weight_recal),
+    !is.na(PSU),
+    !is.na(Stratum),
+    !is.na(n_days)
+  ) %>%
+  transmute(
+    ID,
+    person_weight = Exam_weight_recal,
+    n_days
+  )
+
+epoch_weights <- sleep_sed_epoch_df %>%
+  select(ID, percent_sleep, epoch_duration_hours) %>%
+  inner_join(valid_person_weights, by = "ID") %>%
+  transmute(
+    percent_sleep,
+    epoch_weight = (person_weight / n_days) * epoch_duration_hours
+  ) %>%
+  arrange(percent_sleep)
+
+sleep_values <- epoch_weights$percent_sleep
+cumulative_epoch_weight <- cumsum(epoch_weights$epoch_weight)
+total_epoch_weight <- sum(epoch_weights$epoch_weight)
+total_person_weight <- sum(valid_person_weights$person_weight)
+
+objective_curve <- tibble(cutoff = seq(25, 100, by = 0.1)) %>%
+  mutate(
+    sleep_mean = map_dbl(cutoff, get_sleep_mean_for_cutoff),
+    diff = abs(sleep_mean - self_sleep_mean)
+  )
+
+best_cutoff <- objective_curve %>%
+  arrange(diff, cutoff) %>%
+  slice(1)
+
+selected_cutoff <- as.numeric(best_cutoff$cutoff[1])
+
+model_df_best <- compute_person_for_cutoff(selected_cutoff)
+
+epoch_level_df <- sleep_sed_epoch_df %>%
+  left_join(
+    demo_unique %>%
+      select(ID, Age_group, BMI_cat, Race, Gender, Education, Marital_status, Dataset_demo = Dataset),
+    by = "ID"
+  ) %>%
+  mutate(
+    cutoff = selected_cutoff,
+    is_waking_epoch = percent_sleep < selected_cutoff,
+    sed_hours_epoch = if_else(
+      is_waking_epoch,
+      (percent_sedentary_wrist / 100) * epoch_duration_hours,
+      0
+    ),
+    wake_hours_epoch = if_else(is_waking_epoch, epoch_duration_hours, 0),
+    sleep_nonwear_hours_epoch = if_else(is_waking_epoch, 0, epoch_duration_hours),
+    sleep_nonwear_fraction_hours = (percent_sleep / 100) * epoch_duration_hours,
+    sitting_fraction_hours = (percent_sedentary_wrist / 100) * epoch_duration_hours,
+    Dataset = coalesce(Dataset, Dataset_demo)
+  ) %>%
+  select(
+    ID,
+    Dataset,
+    Day,
+    DayType,
+    Hour,
+    epoch,
+    epoch_duration_hours,
+    cutoff,
+    is_waking_epoch,
+    percent_sedentary_wrist,
+    percent_sleep,
+    sed_hours_epoch,
+    wake_hours_epoch,
+    sleep_nonwear_hours_epoch,
+    sleep_nonwear_fraction_hours,
+    sitting_fraction_hours,
+    Age_group,
+    BMI_cat,
+    Race,
+    Gender,
+    Education,
+    Marital_status,
+    Exam_weight_recal,
+    PSU,
+    Stratum
+  )
+
+write_csv(format_export_numbers(objective_curve), "outputs/cutoff/objective_curve.csv")
+write_csv(format_export_numbers(best_cutoff), "outputs/cutoff/selected_cutoff.csv")
+write_csv(format_export_numbers(model_df_best), "outputs/datasets/analytic_participant_sedentary.csv")
+write_csv(format_export_numbers(epoch_level_df), "outputs/datasets/analytic_epoch_sedentary.csv")
+
+writeLines(
+  c(
+    "Dataset documentation: analytic_participant_sedentary.csv",
+    "",
+    paste0("Generated from reports/source/manuscript_main.Rmd using the ", analysis_epoch, " epoch analysis."),
+    paste0("Final analytic sample size: ", comma(n_distinct(model_df_best$ID)), " participants."),
+    paste0("Selected sleep/nonwear cutoff: ", round(selected_cutoff, 4), "%."),
+    "",
+    "Purpose",
+    "This participant-level dataset is intended to support future epidemiologic research using NHANES 2011-2014 wrist accelerometer-derived waking sedentary time. Each row represents one NHANES participant. The dataset summarizes valid daily accelerometer records to a participant-level estimate of usual daily waking sedentary time after excluding epochs classified as sleep/nonwear.",
+    "",
+    "Source data and processing overview",
+    "The source accelerometer summaries combine CHAP wrist posture predictions with SWaN sleep/nonwear classifications. Epoch-level sitting percentages are converted to sedentary hours by multiplying percent sitting by epoch duration. Epochs with sleep/nonwear percentage greater than or equal to the selected cutoff are excluded from waking sedentary-time estimation. Daily totals are calculated first, then valid days are averaged within participant.",
+    "",
+    "Unit of analysis",
+    "The analytic unit is the NHANES participant. The repeated epoch/day records are used to construct the participant-level sedentary, sleep/nonwear, and waking-time summaries, but they are not retained as separate analytic rows in this file.",
+    "",
+    "Uncertainty columns",
+    "The SD, SE, and CI columns describe within-participant day-to-day variability across valid wear days. They are not NHANES population-level standard errors. Population-level uncertainty should be estimated with the NHANES survey design variables included in this file.",
+    "",
+    "For sedentary time:",
+    "  sd_sed_hours = standard deviation of participant-day sedentary hours across valid days.",
+    "  se_sed_hours = sd_sed_hours / sqrt(n_days).",
+    "  sed_ci_l and sed_ci_u = mean_sed_hours +/- t_(0.975, n_days - 1) * se_sed_hours.",
+    "",
+    "For sleep/nonwear time:",
+    "  sd_sleep_hours = standard deviation of participant-day sleep/nonwear hours across valid days.",
+    "  se_sleep_hours = sd_sleep_hours / sqrt(n_days).",
+    "  sleep_ci_l and sleep_ci_u = mean_sleep_hours +/- t_(0.975, n_days - 1) * se_sleep_hours.",
+    "",
+    "For waking time:",
+    "  mean_wake_hours = 24 - mean_sleep_hours.",
+    "  se_wake_hours = se_sleep_hours.",
+    "  wake_ci_l = 24 - sleep_ci_u.",
+    "  wake_ci_u = 24 - sleep_ci_l.",
+    "",
+    "Participants with one valid day",
+    "When n_days = 1, within-participant SD, SE, and CI cannot be estimated. These uncertainty columns are therefore left missing for one-day participants.",
+    "",
+    "Survey design",
+    "Exam_weight_recal is the recalibrated 2011-2014 NHANES examination weight, created by dividing the original 2-year examination weight by two because the analysis combines the 2011-2012 and 2013-2014 cycles. PSU and Stratum are the masked NHANES variance-estimation variables. Analyses intended to produce nationally representative estimates should use Exam_weight_recal, PSU, and Stratum in an appropriate survey design object.",
+    "",
+    "Variable dictionary",
+    "ID: NHANES participant identifier.",
+    "cutoff: selected sleep/nonwear percentage cutoff used to define waking epochs.",
+    "n_days: number of valid participant-days contributing to the participant-level mean.",
+    "mean_sed_hours: participant mean waking sedentary time in hours/day.",
+    "sd_sed_hours: within-participant standard deviation of daily waking sedentary hours.",
+    "se_sed_hours: within-participant standard error of mean_sed_hours.",
+    "sed_ci_l: lower 95% within-participant CI for mean_sed_hours.",
+    "sed_ci_u: upper 95% within-participant CI for mean_sed_hours.",
+    "mean_sleep_hours: participant mean sleep/nonwear time in hours/day.",
+    "sd_sleep_hours: within-participant standard deviation of daily sleep/nonwear hours.",
+    "se_sleep_hours: within-participant standard error of mean_sleep_hours.",
+    "sleep_ci_l: lower 95% within-participant CI for mean_sleep_hours.",
+    "sleep_ci_u: upper 95% within-participant CI for mean_sleep_hours.",
+    "mean_wake_hours: participant mean waking time in hours/day.",
+    "se_wake_hours: within-participant standard error of mean_wake_hours.",
+    "wake_ci_l: lower 95% within-participant CI for mean_wake_hours.",
+    "wake_ci_u: upper 95% within-participant CI for mean_wake_hours.",
+    "Age_group: age category used for subgroup analyses.",
+    "BMI_cat: BMI category derived from measured weight and height.",
+    "Race: NHANES race/ethnicity category available in the analysis data.",
+    "Gender: participant gender category available in the analysis data.",
+    "Education: coarse education category available in the analysis data.",
+    "Marital_status: marital status category available in the analysis data.",
+    "Exam_weight_recal: recalibrated 2011-2014 NHANES examination weight.",
+    "PSU: masked NHANES primary sampling unit.",
+    "Stratum: masked NHANES variance stratum.",
+    "Dataset: NHANES cycle, either 2011-2012 or 2013-2014.",
+    "",
+    "Recommended use",
+    "Use this dataset for participant-level epidemiologic analyses of waking sedentary time. For descriptive national estimates and subgroup analyses, use the NHANES survey design variables. Do not treat rows as unweighted independent population observations when making nationally representative claims."
+  ),
+  "outputs/documentation/analytic_participant_sedentary_documentation.txt"
+)
+
+writeLines(
+  c(
+    "Dataset documentation: analytic_epoch_sedentary.csv",
+    "",
+    paste0("Generated from reports/source/manuscript_main.Rmd using the ", analysis_epoch, " epoch analysis."),
+    paste0("Final analytic sample size represented: ", comma(n_distinct(epoch_level_df$ID)), " participants."),
+    paste0("Number of epoch-level rows: ", comma(nrow(epoch_level_df)), "."),
+    paste0("Selected sleep/nonwear cutoff: ", round(selected_cutoff, 4), "%."),
+    "",
+    "Purpose",
+    "This epoch-level dataset is intended to support future epidemiologic research that needs repeated accelerometer summary records rather than only participant-level usual daily means. Each row represents one native analysis epoch for one NHANES participant-day.",
+    "",
+    "Source data and processing overview",
+    "The source accelerometer summaries combine CHAP wrist posture predictions with SWaN sleep/nonwear classifications. Each epoch retains the CHAP-derived sitting percentage and SWaN-derived sleep/nonwear percentage. The selected sleep/nonwear cutoff is applied to flag whether the epoch contributes to waking sedentary-time estimation.",
+    "",
+    "Unit of analysis",
+    paste0("The analytic unit is the participant epoch. For this render, the native epoch is ", ifelse(analysis_epoch == "30m", "30 minutes", "1 hour"), ". Participant-level manuscript estimates are still calculated from participant summaries; this file is provided for future repeated-measure, time-of-day, day-level, and sensitivity analyses."),
+    "",
+    "Derived epoch-level quantities",
+    "is_waking_epoch is TRUE when percent_sleep is less than the selected cutoff.",
+    "sed_hours_epoch equals percent_sedentary_wrist / 100 multiplied by epoch_duration_hours for waking epochs, and 0 for epochs classified as sleep/nonwear.",
+    "wake_hours_epoch equals epoch_duration_hours for waking epochs, and 0 otherwise.",
+    "sleep_nonwear_hours_epoch equals epoch_duration_hours for epochs classified as sleep/nonwear, and 0 otherwise.",
+    "sleep_nonwear_fraction_hours equals percent_sleep / 100 multiplied by epoch_duration_hours. This is a fractional SWaN summary and is not the binary cutoff-based exclusion measure.",
+    "sitting_fraction_hours equals percent_sedentary_wrist / 100 multiplied by epoch_duration_hours before applying the sleep/nonwear cutoff.",
+    "",
+    "Survey design",
+    "Exam_weight_recal, PSU, and Stratum are included for linkage and reproducibility. Because NHANES weights are assigned to participants rather than epochs, users should not treat each epoch as an independently weighted population observation without accounting for repeated measures within participants. Participant-level national estimates should use analytic_participant_sedentary.csv.",
+    "",
+    "Variable dictionary",
+    "ID: NHANES participant identifier.",
+    "Dataset: NHANES cycle, either 2011-2012 or 2013-2014.",
+    "Day: participant wear day/date identifier from the analysis-ready accelerometer summaries.",
+    "DayType: weekday/weekend classification.",
+    "Hour: hour of day.",
+    "epoch: within-hour epoch index; 1 for hourly data.",
+    "epoch_duration_hours: duration represented by the row, in hours.",
+    "cutoff: selected sleep/nonwear percentage cutoff used to define waking epochs.",
+    "is_waking_epoch: TRUE if percent_sleep is below cutoff.",
+    "percent_sedentary_wrist: CHAP-derived sitting percentage for the epoch.",
+    "percent_sleep: SWaN-derived sleep/nonwear percentage for the epoch.",
+    "sed_hours_epoch: cutoff-aware waking sedentary hours contributed by the epoch.",
+    "wake_hours_epoch: cutoff-aware waking hours contributed by the epoch.",
+    "sleep_nonwear_hours_epoch: cutoff-aware sleep/nonwear hours contributed by the epoch.",
+    "sleep_nonwear_fraction_hours: fractional sleep/nonwear hours implied by percent_sleep.",
+    "sitting_fraction_hours: fractional sitting hours implied by percent_sedentary_wrist before sleep/nonwear exclusion.",
+    "Age_group: age category used for subgroup analyses.",
+    "BMI_cat: BMI category derived from measured weight and height.",
+    "Race: NHANES race/ethnicity category available in the analysis data.",
+    "Gender: participant gender category available in the analysis data.",
+    "Education: coarse education category available in the analysis data.",
+    "Marital_status: marital status category available in the analysis data.",
+    "Exam_weight_recal: recalibrated 2011-2014 NHANES examination weight.",
+    "PSU: masked NHANES primary sampling unit.",
+    "Stratum: masked NHANES variance stratum.",
+    "",
+    "Recommended use",
+    "Use this dataset for repeated-measure descriptions, time-of-day analyses, sensitivity checks, and linkage to participant-level summaries. Use analytic_participant_sedentary.csv for primary nationally representative participant-level sedentary-time estimates."
+  ),
+  "outputs/documentation/analytic_epoch_sedentary_documentation.txt"
+)
+
+```
+
+
+## Objective Curve for Cutoff Selection
+
+The fine-resolution objective curve selected a sleep/non-wear cutoff of `r round(selected_cutoff, 2)`%. At this cutoff, the survey-weighted accelerometer-derived sleep estimate was `r round(best_cutoff$sleep_mean[1], 2)` hours/day, and the absolute difference from the survey-weighted self-reported sleep benchmark was `r round(best_cutoff$diff[1], 3)` hours/day. This selected value is used for the primary waking sedentary-time analysis.
+
+```{r objective-curve-plot, results="hide"}
+objective_plot <- ggplot(objective_curve, aes(x = cutoff, y = diff)) +
+  geom_line(color = "#2F5F98", linewidth = 1.2) +
+  geom_point(
+    data = best_cutoff,
+    aes(x = cutoff, y = diff),
+    color = "#8B1E2D",
+    size = 3.5
+  ) +
+  geom_vline(
+    xintercept = selected_cutoff,
+    color = "#8B1E2D",
+    linewidth = 1,
+    linetype = "dashed"
+  ) +
+  annotate(
+    "text",
+    x = selected_cutoff,
+    y = max(objective_curve$diff, na.rm = TRUE) * 0.12,
+    label = paste0("Selected cutoff = ", selected_cutoff, "%"),
+    hjust = 1.1,
+    color = "#8B1E2D",
+    fontface = "bold",
+    size = 4
+  ) +
+  labs(
+    x = "Sleep cutoff (%)",
+    y = "Abs. difference",
+    title = "Cutoff Objective"
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    axis.title = element_text(face = "bold"),
+    axis.text = element_text(color = "black")
+  )
+
+ggsave(
+  "figures/diagnostics/objective_function_cutoff.png",
+  objective_plot,
+  width = 8,
+  height = 5,
+  dpi = 600,
+  bg = "white"
+)
+ggsave(
+  "figures/diagnostics/objective_function_cutoff.pdf",
+  objective_plot,
+  width = 8,
+  height = 5,
+  bg = "white"
+)
+
+```
+
+## Displaying the objective function plot to visualize the cutoff selection process
+
+
+```{r objective-function-plot, fig.cap="Objective function for sleep-cutoff calibration. The curve shows the absolute difference between survey-weighted accelerometer-derived sleep duration and survey-weighted self-reported sleep duration across candidate sleep-percentage cutoffs. The dashed vertical line marks the selected cutoff.", out.width="60%", echo=FALSE}
+knitr::include_graphics(render_path("figures/diagnostics/objective_function_cutoff.png"), rel_path = FALSE)
+```
+
+
+## Main Analytic Dataset At Selected Cutoff
+
+```{r selected-cutoff-data, results="hide"}
+des_best <- svydesign(
+  id = ~PSU,
+  strata = ~Stratum,
+  weights = ~Exam_weight_recal,
+  nest = TRUE,
+  data = model_df_best
+)
+
+analytic_df <- model_df_best
+analytic_design <- des_best
+
+overall_sed <- svymean(~mean_sed_hours, des_best, na.rm = TRUE)
+overall_sed_ci <- confint(overall_sed)
+overall_wake <- svymean(~mean_wake_hours, des_best, na.rm = TRUE)
+overall_wake_ci <- confint(overall_wake)
+overall_sleep <- svymean(~mean_sleep_hours, des_best, na.rm = TRUE)
+overall_sleep_ci <- confint(overall_sleep)
+
+main_results <- tibble(
+  Measure = c(
+    "Waking sedentary time",
+    "Waking time",
+    "Sleep/nonwear time"
+  ),
+  `Mean (h/day)` = c(
+    coef(overall_sed)[1],
+    coef(overall_wake)[1],
+    coef(overall_sleep)[1]
+  ),
+  SE = c(
+    SE(overall_sed)[1],
+    SE(overall_wake)[1],
+    SE(overall_sleep)[1]
+  ),
+  `95% CI lower` = c(
+    overall_sed_ci[1, 1],
+    overall_wake_ci[1, 1],
+    overall_sleep_ci[1, 1]
+  ),
+  `95% CI upper` = c(
+    overall_sed_ci[1, 2],
+    overall_wake_ci[1, 2],
+    overall_sleep_ci[1, 2]
+  )
+) %>%
+  mutate(across(where(is.numeric), ~round(.x, 4)))
+
+write_csv(format_export_numbers(main_results), "outputs/results/main_results.csv")
+
+sleep_aware_epoch_df <- sleep_sed_df %>%
+  filter(percent_sleep < selected_cutoff)
+
+if (analysis_epoch == "1h") {
+  hourly_plot_df <- sleep_sed_df
+  sleep_aware_hourly_df <- sleep_aware_epoch_df
+} else {
+  hourly_plot_df <- aggregate_to_hour(sleep_sed_df)
+  sleep_aware_hourly_df <- aggregate_to_hour(sleep_aware_epoch_df)
+}
+```
+
+## Main Results
+
+Using the selected sleep/nonwear cutoff of `r round(selected_cutoff, 2)`%, the final analytic sample included `r comma(n_distinct(analytic_df$ID))` participants. The survey-weighted mean waking sedentary time was `r round(coef(overall_sed)[1], 2)` hours/day (SE = `r round(SE(overall_sed)[1], 2)`; 95% CI: `r round(overall_sed_ci[1, 1], 2)`, `r round(overall_sed_ci[1, 2], 2)`). Mean waking time after sleep/nonwear exclusion was `r round(coef(overall_wake)[1], 2)` hours/day, and mean sleep/nonwear time was `r round(coef(overall_sleep)[1], 2)` hours/day.
+
+```{r main-results-table}
+kable(
+  main_results,
+  digits = 2,
+  caption = "Main survey-weighted estimates at the selected sleep/nonwear cutoff."
+)
+```
+
+## Justification for Combining Survey Cycles
+
+```{r cycle-comparison, results="asis"}
+## Justification for Combining Survey Cycles
+
+cycle_design <- svydesign(
+  id = ~PSU,
+  strata = ~Stratum,
+  weights = ~Exam_weight_recal,
+  nest = TRUE,
+  data = model_df_best %>%
+    mutate(Dataset = factor(Dataset, levels = c("2011-2012", "2013-2014")))
+)
+
+cycle_sed_estimates <- svyby(
+  ~mean_sed_hours,
+  ~Dataset,
+  cycle_design,
+  svymean,
+  na.rm = TRUE,
+  vartype = "se"
+) %>%
+  as_tibble() %>%
+  transmute(
+    Dataset,
+    mean_sed_hours,
+    SE = se
+  )
+
+cycle_model <- svyglm(
+  mean_sed_hours ~ Dataset,
+  design = cycle_design
+)
+
+cycle_difference <- coef(cycle_model)["Dataset2013-2014"]
+cycle_difference_se <- SE(cycle_model)["Dataset2013-2014"]
+cycle_model_summary <- summary(cycle_model)
+
+cycle_2011_12_mean <- cycle_sed_estimates$mean_sed_hours[cycle_sed_estimates$Dataset == "2011-2012"]
+cycle_2011_12_se <- cycle_sed_estimates$SE[cycle_sed_estimates$Dataset == "2011-2012"]
+cycle_2013_14_mean <- cycle_sed_estimates$mean_sed_hours[cycle_sed_estimates$Dataset == "2013-2014"]
+cycle_2013_14_se <- cycle_sed_estimates$SE[cycle_sed_estimates$Dataset == "2013-2014"]
+
+cycle_sed_estimates %>%
+  mutate(
+    `Mean sedentary time (hours/day)` = format_decimal(mean_sed_hours, 2),
+    SE = format_decimal(SE, 2)
+  ) %>%
+  select(Dataset, `Mean sedentary time (hours/day)`, SE) %>%
+  kable(
+    caption = "Survey-weighted mean sedentary time by NHANES cycle."
+  )
+
+## Checking if the difference is statistically significant
+cycle_p_value <- as.numeric(coef(cycle_model_summary)["Dataset2013-2014", "Pr(>|t|)"])
+```
+
+
+### Justification for Combining Survey Cycles
+
+To assess whether the two NHANES cycles could be pooled, we compared survey-weighted estimates of mean sedentary time between 2011-2012 and 2013-2014. The mean sedentary time was `r round(cycle_2011_12_mean, 2)` hours/day (SE = `r round(cycle_2011_12_se, 2)`) in 2011-2012 and `r round(cycle_2013_14_mean, 2)` hours/day (SE = `r round(cycle_2013_14_se, 2)`) in 2013-2014. The survey-weighted regression estimate of the difference was `r round(cycle_difference, 2)` hours/day. This difference is small relative to the overall mean and provides no evidence of a meaningful change in sedentary time between cycles. Based on this, the two cycles were combined for all subsequent analyses. This approach is consistent with NHANES analytic guidance, which supports pooling survey cycles when key estimates are stable across time (NCHS, 2026).
+The survey-weighted regression estimate of the difference was `r round(cycle_difference, 2)` hours/day (p = `r signif(cycle_p_value, 3)`).
+
+### NHANES Analytic Approach
+
+The primary estimand in this manuscript is the population mean of each participant's usual daily waking sedentary time. The analysis therefore treats the NHANES sample person, not the hour, as the survey-weighted analytic unit. This matches NHANES guidance: sample weights are assigned to sample persons and account for unequal probability of selection, nonresponse, and post-stratification to U.S. population control totals; these weights are needed to produce unbiased national estimates from continuous NHANES ([NCHS Sample Design Module](https://wwwn.cdc.gov/nchs/nhanes/tutorials/sampledesign.aspx)).
+
+The repeated accelerometer summary records were still used fully to derive the participant-level exposure. For each candidate sleep cutoff, SWaN sleep/nonwear percentages determined whether an epoch was treated as waking time, CHAP sitting probabilities contributed fractional sedentary hours using the epoch duration, daily totals were computed, and valid days were averaged within participant. The person-level mean is therefore a summary of all available valid epoch- and daily-level information for that participant. What is intentionally removed before the main survey estimation is the repeated-record structure itself, because leaving epochs or days as separate weighted records would give participants with more observed records or valid days more influence than participants with fewer records. That would change the estimand from a population mean across people to a record-weighted mean across observed person-epochs or person-days.
+
+The manuscript addresses NHANES analytic guidance in four specific ways. First, because the analysis combines NHANES 2011-2012 and 2013-2014, the examination weight is divided by two to form a 2011-2014 weight, consistent with NHANES instructions that combined weights from 2001-2002 onward are created by dividing the 2-year weights by the number of 2-year cycles ([NCHS Weighting Module](https://wwwn.cdc.gov/nchs/nhanes/tutorials/weighting.aspx/SampleCode.aspx)). Second, the survey design includes the masked variance strata and masked PSU with `nest = TRUE`, which follows NHANES guidance for public-use design variables in continuous NHANES. Third, standard errors and confidence intervals are estimated with Taylor series linearization through the R `survey` package, the variance-estimation approach recommended by NCHS for NHANES analyses ([NCHS Variance Estimation Module](https://wwwn.cdc.gov/nchs/NHANES/tutorials/VarianceEstimation.aspx)). Fourth, subgroup estimates are obtained from the survey design object using domain/subset analyses rather than by defining a new design after dropping non-subgroup records, preserving the design information needed for valid subgroup standard errors.
+
+Thus, the person-level summary does not discard the epoch- or day-level information used to estimate sedentary behavior; it uses those data to construct the participant's daily mean and then applies the NHANES person-level survey design to the quantity that each sampled person represents. Epoch-level or day-level mixed models can be useful as sensitivity analyses for within-person variability, but they answer a different modeling question and require additional assumptions about the repeated-measure correlation structure and how person-level NHANES weights should be represented across repeated observations.
+
+### Demographic Variables and Survey Weights
+
+Demographic and anthropometric variables were taken from the NHANES metadata file and reduced to one record per participant before survey estimation. Age was grouped as `<18`, `18-34`, `35-44`, `45-64`, and `>=65` years. Race/ethnicity was retained using the NHANES-coded categories available in the analysis data. BMI was calculated from measured weight and height as weight in kilograms divided by height in meters squared, then grouped as under/normal weight (`BMI < 25`), overweight (`25 <= BMI < 30`), and obesity (`BMI >= 30`). Participants with missing age, race/ethnicity, BMI, design variables, or weights were not recoded into another category; missing subgroup information remains missing and is excluded only from the relevant subgroup/domain estimate.
+
+These variables are used to describe population heterogeneity in waking sedentary time, not as repeated epoch-level variables. Subgroup estimates for age, gender, race/ethnicity, and BMI are calculated from the participant-level survey design object using domain analyses. This preserves the full NHANES design information for standard error estimation while estimating the mean for the population domain of interest. Survey weights are treated as design weights rather than ordinary covariates: the recalibrated examination weight defines each participant's contribution to national estimates, while masked strata and PSU variables define the variance structure.
+
+```{r demographic-missingness}
+analytic_demo_missingness <- analytic_df %>%
+  distinct(ID, .keep_all = TRUE)
+
+analytic_sample_n <- n_distinct(analytic_demo_missingness$ID)
+
+summarise_missingness <- function(df, variable, label, denominator) {
+  values <- df[[variable]]
+  missing_n <- sum(is.na(values))
+
+  tibble(
+    Variable = label,
+    `Analytic sample N` = denominator,
+    `Missing n` = missing_n,
+    `Missing %` = round(100 * missing_n / denominator, 4),
+    `Available n` = denominator - missing_n
+  )
+}
+
+demographic_missingness <- bind_rows(
+  summarise_missingness(analytic_demo_missingness, "Age_group", "Age group", analytic_sample_n),
+  summarise_missingness(analytic_demo_missingness, "Gender", "Gender", analytic_sample_n),
+  summarise_missingness(analytic_demo_missingness, "Race", "Race/ethnicity", analytic_sample_n),
+  summarise_missingness(analytic_demo_missingness, "BMI_cat", "BMI category", analytic_sample_n),
+  summarise_missingness(analytic_demo_missingness, "Education", "Education", analytic_sample_n),
+  summarise_missingness(analytic_demo_missingness, "Marital_status", "Marital status", analytic_sample_n),
+  summarise_missingness(analytic_demo_missingness, "Exam_weight_recal", "Recalibrated examination weight", analytic_sample_n),
+  summarise_missingness(analytic_demo_missingness, "PSU", "Masked PSU", analytic_sample_n),
+  summarise_missingness(analytic_demo_missingness, "Stratum", "Masked stratum", analytic_sample_n)
+) %>%
+  arrange(Variable)
+
+write_csv(
+  format_selected_numbers(demographic_missingness, "Missing %"),
+  "outputs/qc/demographic_missingness.csv"
+)
+
+kable(
+  format_render_table(demographic_missingness),
+  digits = 2,
+  caption = "Missingness of demographic and survey design variables relative to the final analytic sample."
+)
+```
+
+The final analytic sample included `r comma(analytic_sample_n)` participants after applying accelerometer-data availability and survey-design requirements. Missingness in demographic and survey design variables is shown relative to this analytic denominator so subgroup tables can be interpreted with the correct available sample for each domain.
+
+### Overview of Sedentary-Time Estimation
+
+The analysis proceeded in the following steps:
+
+1. **Start with wrist accelerometer data.** We used NHANES 2011-2012 and 2013-2014 wrist accelerometer files. Each file records movement over time for one participant, usually across several wear days.
+
+2. **Prepare the files for prediction models.** The raw files were organized by participant and day and converted into the formats needed by the posture and sleep/wear models.
+
+3. **Identify sitting in 10-second epochs.** The CHAP/DeepPostures model classified each 10-second epoch as sitting or not sitting. For example, one minute contains six 10-second epochs, so a participant could have six sitting/not-sitting predictions in a single minute.
+
+4. **Identify sleep and non-wear in 30-second epochs.** The SWaN model classified each 30-second epoch as wake wear, sleep, or non-wear. For example, one hour contains 120 30-second epochs, and those epochs were used to describe how much of the hour was sleep or non-wear.
+
+5. **Summarize predictions for analysis.** The epoch-level predictions were converted to `r ifelse(analysis_epoch == "30m", "30-minute", "hourly")` percentages for the primary analysis. Figure 2 aggregates the analysis records to hours so hourly patterns are displayed consistently across epoch choices.
+
+6. **Choose the sleep/non-wear cutoff.** Candidate cutoffs were evaluated by comparing survey-weighted accelerometer-derived sleep duration with NHANES self-reported sleep duration. The cutoff with the smallest absolute difference was selected for the primary waking sedentary-time analysis. This cutoff is a practical rule for classifying accelerometer summaries, not an exact biological boundary.
+
+7. **Keep only waking epochs for sedentary-time estimation.** Epochs below the selected sleep/non-wear cutoff were treated as waking epochs. Epochs at or above the cutoff were removed from waking sedentary-time estimation.
+
+8. **Calculate sedentary hours for each day.** For each participant-day, sitting percentages were multiplied by epoch duration and added across waking epochs. The sum across waking epochs gave total waking sedentary time for that day.
+
+9. **Average days within each participant.** Daily waking sedentary-time values were averaged across each participant's valid wear days. For example, if a participant had four valid days, the four daily values were averaged to estimate that participant's usual daily waking sedentary time.
+
+10. **Use the NHANES survey design.** Each participant's usual daily waking sedentary time was analyzed using NHANES examination weights, masked variance strata, and masked primary sampling units. The 2011-2012 and 2013-2014 cycles were combined using recalibrated 4-year weights.
+
+11. **Estimate national and subgroup values.** Survey-weighted means and confidence intervals were estimated for the full population and for subgroups defined by age, gender, race/ethnicity, and BMI category.
+
+```{=latex}
+\analysispagebreak
+```
+
+## Figure 1
+
+Workflow for deriving hourly sitting and sleep summaries. (A) Raw 80 Hz accelerometer signal. (B) CHAP sitting predictions and SWaN sleep/wake/non-wear classifications. (C) Hourly sitting and sleep/non-wear percentages used to define waking sedentary time under candidate sleep cutoffs.
+
+```{r figure-1, fig.cap="Workflow for deriving hourly sitting and sleep summaries. (A) Raw 80 Hz accelerometer signal. (B) CHAP sitting predictions and SWaN sleep/wake/non-wear classifications. (C) Hourly sitting and sleep/non-wear percentages used to define waking sedentary time under candidate sleep cutoffs.", out.width="70%"}
+source("R/make_preprocessing_workflow_figure.R")
+knitr::include_graphics(render_path("figures/manuscript/fig1.png"), rel_path = FALSE)
+```
+
+```{=latex}
+\analysispagebreak
+```
+
+## Table 2
+
+Comparison of sedentary time estimates across studies by measurement method, datasets, and population.
+
+```{r table-2}
+table2 <- tibble::tribble(
+  ~Paper, ~`Dataset & Population`, ~Method, ~`Estimate & Notes`,
+
+  "This study",
+  paste0("NHANES 2011-2014, wrist-worn 80 Hz accelerometer data; ", comma(n_distinct(analytic_df$ID)), " participants, aged 3+ years."),
+  "CHAP wrist model combined with SWaN.",
+  paste0(format_decimal(coef(overall_sed)[1]), " hours/day. Estimated waking sedentary time. Mean waking time was ", format_decimal(coef(svymean(~mean_wake_hours, analytic_design, na.rm = TRUE))[1]), " hours/day after sleep exclusion."),
+
+  "Matthews et al. (2008)",
+  "NHANES 2003-2004; hip-worn ActiGraph data; 6,329 participants, aged 6+ years.",
+  "Intensity threshold of <100 counts/min.",
+  "7.7000 hours/day. Represented 54.9000% of monitored time. Mean monitor wear time was 13.9000 hours/day.",
+
+  "Yang et al. (2019)",
+  "NHANES 2001-2016; 51,896 children and adolescents.",
+  "Self-reported total sitting time from questionnaire.",
+  "~6.4000 hours/day in adults; 8.2000 hours/day in adolescents. Sitting time increased in both groups from 2001 onward.",
+
+  "Ussery et al. (2018)",
+  "NHANES 2015-2016; 5,923 U.S. adults aged 18+ years.",
+  "Self-reported sitting time on a typical day.",
+  "~6.4000 hours/day. Excludes sleeping time; 25.7000% of adults reported sitting for more than 8 hours per day."
+)
+write_csv(table2, "outputs/tables/table2_study_comparison.csv")
+
+kable(
+  format_render_table(table2),
+  caption = "Comparison of sedentary time estimates across studies by measurement method, datasets, and population."
+)
+```
+
+```{=latex}
+\analysispagebreak
+```
+
+## Figure 2
+
+Survey-weighted hourly patterns of wrist-derived sedentary behavior by day type before and after sleep exclusion. Panel A shows CHAP-predicted sitting time including sleep periods; Panel B shows waking sedentary time after excluding records with sleep/nonwear greater than or equal to the selected `r selected_cutoff`% cutoff. Lines represent hourly means and shaded bands indicate 95% confidence intervals.
+
+```{r figure-2-code}
+make_hourly_daytype_plot <- function(df, yvar, ylab, title_label, y_limits) {
+  df <- df %>%
+    mutate(DayType = factor(DayType, levels = c("Weekend", "Weekday")))
+
+  des <- svydesign(
+    id = ~PSU,
+    strata = ~Stratum,
+    weights = ~Exam_weight_recal,
+    nest = TRUE,
+    data = df
+  )
+
+  hourly_est <- svyby(
+    as.formula(paste0("~", yvar)),
+    by = ~DayType + Hour,
+    design = des,
+    FUN = svymean,
+    vartype = "ci",
+    na.rm = TRUE
+  ) %>%
+    rename(estimate = !!sym(yvar))
+
+  daytype_colors <- c("Weekend" = "#0072B2", "Weekday" = "#D55E00")
+
+  ggplot(hourly_est, aes(x = Hour, y = estimate, group = DayType)) +
+    geom_ribbon(aes(ymin = ci_l, ymax = ci_u, fill = DayType), alpha = 0.28, color = NA) +
+    geom_line(aes(y = ci_l, color = DayType), linewidth = 0.35, alpha = 0.65) +
+    geom_line(aes(y = ci_u, color = DayType), linewidth = 0.35, alpha = 0.65) +
+    geom_line(aes(color = DayType, linetype = DayType), linewidth = 1.35) +
+    geom_point(aes(color = DayType, shape = DayType), size = 3.3, stroke = 1.25, fill = "white") +
+    scale_color_manual(values = daytype_colors) +
+    scale_fill_manual(values = daytype_colors) +
+    scale_linetype_manual(values = c("Weekend" = "solid", "Weekday" = "dashed")) +
+    scale_shape_manual(values = c("Weekend" = 16, "Weekday" = 1)) +
+    scale_x_continuous(breaks = seq(0, 24, 4), minor_breaks = seq(1, 24, 1), limits = c(1, 24)) +
+    scale_y_continuous(
+      limits = y_limits,
+      labels = percent_format(scale = 1),
+      breaks = seq(y_limits[1], y_limits[2], 10)
+    ) +
+    labs(x = "Hour of day", y = ylab, title = title_label, color = NULL, fill = NULL, linetype = NULL, shape = NULL) +
+    guides(fill = "none") +
+    theme_bw(base_size = 15) +
+    theme(
+      plot.title = element_text(face = "bold", size = 16, hjust = 0.5, margin = margin(b = 8)),
+      axis.title = element_text(face = "bold", size = 14),
+      axis.text = element_text(color = "black", size = 12),
+      panel.grid.major = element_line(color = "grey88", linewidth = 0.35),
+      panel.grid.minor.x = element_line(color = "grey94", linewidth = 0.25),
+      panel.grid.minor.y = element_blank(),
+      panel.border = element_rect(color = "black", linewidth = 0.7),
+      legend.position = "bottom",
+      legend.text = element_text(size = 13)
+    )
+}
+
+p_left <- make_hourly_daytype_plot(
+  df = hourly_plot_df,
+  yvar = "percent_sedentary_wrist",
+  ylab = "Sitting (%)",
+  title_label = "",
+  y_limits = c(50, 100)
+) +
+  labs(tag = "A")
+
+p_right <- make_hourly_daytype_plot(
+  df = sleep_aware_hourly_df,
+  yvar = "percent_sedentary_wrist",
+  ylab = "Waking sitting (%)",
+  title_label = "",
+  y_limits = c(50, 100)
+) +
+  labs(tag = "B")
+
+figure2 <- p_left + p_right +
+  plot_layout(guides = "collect", widths = c(1, 1)) &
+  theme(
+    legend.position = "bottom",
+    plot.tag = element_text(face = "bold", size = 19),
+    plot.tag.position = c(0.02, 0.98)
+  )
+
+ggsave("figures/manuscript/figure2_hourly_daytype.png", figure2, width = 10, height = 5.8, units = "in", dpi = 600, bg = "white")
+ggsave("figures/manuscript/figure2_hourly_daytype.pdf", figure2, width = 10, height = 5.8, units = "in", bg = "white")
+```
+
+```{r figure-2, fig.cap=paste0("Survey-weighted hourly patterns of wrist-derived sedentary behavior by day type before and after sleep exclusion. Panel A shows CHAP-predicted sitting time including sleep periods; Panel B shows waking sedentary time after excluding records with sleep/nonwear greater than or equal to the selected ", selected_cutoff, "% cutoff. Lines represent hourly means and shaded bands indicate 95% confidence intervals."), out.width="75%", echo=FALSE}
+figure2
+```
+
+```{=latex}
+\analysispagebreak
+```
+
+## Figure 3
+
+Distribution of participants by mean daily waking sedentary time and corresponding 24-hour behavioral composition. Panel A shows the proportion and unweighted number of participants in each sedentary-time category. Panel B shows the mean daily allocation to sedentary time, sleep/nonwear, and other waking time within each category.
+
+```{r figure-3-code}
+df_plot <- analytic_df %>%
+  distinct(ID, .keep_all = TRUE) %>%
+  mutate(
+    sed_bin = cut(
+      mean_sed_hours,
+      breaks = c(0, 4, seq(6, 16, by = 2), Inf),
+      labels = c("0-4", "4-6", "6-8", "8-10", "10-12", "12-14", "14-16", "16+"),
+      include.lowest = TRUE,
+      right = FALSE
+    )
+  ) %>%
+  filter(!is.na(sed_bin))
+
+plot_df <- df_plot %>%
+  group_by(sed_bin) %>%
+  summarise(
+    n = n_distinct(ID),
+    prop = n / n_distinct(df_plot$ID),
+    .groups = "drop"
+  ) %>%
+  mutate(label = paste0("n=", comma(n), "\n", percent(prop, accuracy = 0.1)))
+
+left_plot <- ggplot(plot_df, aes(x = sed_bin, y = prop)) +
+  geom_col(width = 0.5, fill = "#4E79A7", color = "black", linewidth = 0.3) +
+  geom_text(aes(label = label), vjust = -0.35, size = 3.05, lineheight = 0.82) +
+  scale_x_discrete(expand = expansion(add = 0.7)) +
+  scale_y_continuous(labels = percent_format(accuracy = 1), expand = expansion(mult = c(0, 0.24))) +
+  labs(x = "Sedentary time (h/day)", y = "Participants (%)", tag = "A") +
+  coord_cartesian(clip = "off") +
+  theme_bw(base_size = 14) +
+  theme(
+    axis.title = element_text(face = "bold", size = 13),
+    axis.text = element_text(color = "black", size = 11),
+    axis.text.x = element_text(angle = 25, hjust = 1, vjust = 1),
+    panel.grid.major.x = element_blank(),
+    panel.grid.major.y = element_line(color = "grey88", linewidth = 0.35),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(color = "black", linewidth = 0.7)
+  )
+
+right_df <- df_plot %>%
+  group_by(sed_bin) %>%
+  summarise(
+    Sedentary = mean(mean_sed_hours, na.rm = TRUE),
+    `Sleep/nonwear` = mean(mean_sleep_hours, na.rm = TRUE),
+    `Other waking time` = mean(24 - mean_sed_hours - mean_sleep_hours, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+right_df_long <- right_df %>%
+  pivot_longer(cols = c(`Sleep/nonwear`, Sedentary, `Other waking time`), names_to = "behavior", values_to = "hours") %>%
+  mutate(
+    behavior = factor(behavior, levels = c("Sleep/nonwear", "Sedentary", "Other waking time")),
+    percent_day = hours / 24
+  )
+
+right_label_df <- right_df %>%
+  pivot_longer(cols = c(`Other waking time`, Sedentary, `Sleep/nonwear`), names_to = "behavior", values_to = "hours") %>%
+  group_by(sed_bin) %>%
+  mutate(
+    x_mid = cumsum(hours) - hours / 2,
+    percent_label = ifelse(hours >= 1.2, percent(hours / 24, accuracy = 1), ""),
+    label_color = ifelse(behavior %in% c("Other waking time", "Sedentary"), "white", "black")
+  ) %>%
+  ungroup()
+
+right_plot <- ggplot(right_df_long, aes(x = hours, y = sed_bin, fill = behavior)) +
+  geom_col(width = 0.72, color = "white", linewidth = 0.45) +
+  geom_text(
+    data = right_label_df,
+    aes(x = x_mid, y = sed_bin, label = percent_label, color = label_color),
+    inherit.aes = FALSE,
+    size = 3.3,
+    fontface = "bold"
+  ) +
+  scale_fill_manual(values = c("Sleep/nonwear" = "#9ECAE1", "Sedentary" = "#4E79A7", "Other waking time" = "#59A14F")) +
+  scale_color_identity(guide = "none") +
+  guides(fill = guide_legend(reverse = TRUE)) +
+  scale_x_continuous(breaks = seq(0, 24, by = 4), expand = expansion(mult = c(0, 0.02))) +
+  coord_cartesian(xlim = c(0, 24), clip = "off") +
+  labs(x = "Hours/day", y = "Sedentary time (h/day)", fill = NULL, tag = "B") +
+  theme_bw(base_size = 14) +
+  theme(
+    axis.title = element_text(face = "bold", size = 13),
+    axis.text = element_text(color = "black", size = 11),
+    panel.grid.major.y = element_blank(),
+    panel.grid.major.x = element_line(color = "grey88", linewidth = 0.35),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(color = "black", linewidth = 0.7),
+    legend.position = "bottom",
+    legend.text = element_text(size = 11)
+  )
+
+figure3 <- left_plot + right_plot +
+  plot_layout(widths = c(1.55, 1.35), guides = "collect") &
+  theme(
+    legend.position = "bottom",
+    plot.tag = element_text(face = "bold", size = 15),
+    plot.tag.position = c(0.02, 0.98)
+  )
+
+ggsave("figures/manuscript/sedentary_distribution_with_24h_composition.png", figure3, width = 12.8, height = 5.2, units = "in", dpi = 600, bg = "white")
+ggsave("figures/manuscript/sedentary_distribution_with_24h_composition.pdf", figure3, width = 12.8, height = 5.2, units = "in", bg = "white")
+```
+
+```{r figure-3, fig.cap="Distribution of participants by mean daily waking sedentary time and corresponding 24-hour behavioral composition. Panel A shows the proportion and unweighted number of participants in each sedentary-time category. Panel B shows the mean daily allocation to sedentary time, sleep/nonwear, and other waking time within each category.", out.width="78%", echo=FALSE}
+figure3
+```
+
+```{=latex}
+\analysispagebreak
+```
+
+## Table 3
+
+Weighted amount of time spent in sedentary behavior (mean hours/day), by gender and age, United States, 2011-2014.
+
+```{r table-3}
+age_levels <- c("<18", "18-34", "35-44", "45-64", ">=65")
+denominator <- n_distinct(analytic_df$ID)
+
+make_age_gender_row <- function(age_group) {
+  data_age <- if (age_group == "All ages") analytic_df else filter(analytic_df, Age_group == age_group)
+  des_age <- if (age_group == "All ages") analytic_design else subset(analytic_design, Age_group == age_group)
+
+  tibble(
+    `Age group (years)` = age_group,
+    `Male N (%)` = format_n_pct(filter(data_age, Gender == "Male"), denominator),
+    `Male Mean (95% CI)` = format_mean_ci(subset(des_age, Gender == "Male")),
+    `Female N (%)` = format_n_pct(filter(data_age, Gender == "Female"), denominator),
+    `Female Mean (95% CI)` = format_mean_ci(subset(des_age, Gender == "Female"))
+  )
+}
+
+table3 <- map_dfr(c("All ages", age_levels), make_age_gender_row)
+
+write_csv(table3, "outputs/tables/table3_age_gender_sedentary.csv")
+
+kable(
+  format_render_table(table3),
+  caption = "Weighted amount of time spent in sedentary behavior (mean hours/day), by gender and age, United States, 2011-2014."
+)
+```
+
+```{=latex}
+\analysispagebreak
+```
+
+## Table 4
+
+Weighted mean sedentary time (hours/day) by race/ethnicity and BMI category, NHANES 2011-2014.
+
+```{r table-4}
+race_levels <- c("Mexican American", "NH Asian", "NH Black", "NH White", "Other Hispanic", "Other/Multi")
+bmi_levels <- c("under/normal weight", "overweight", "obesity")
+
+make_race_bmi_row <- function(race) {
+  get_cell <- function(bmi_cat) {
+    if (race == "All") {
+      format_mean_ci(subset(analytic_design, BMI_cat == bmi_cat))
+    } else {
+      format_mean_ci(subset(analytic_design, Race == race & BMI_cat == bmi_cat))
+    }
+  }
+
+  tibble(
+    Race = race,
+    `Underweight/normal` = get_cell("under/normal weight"),
+    Overweight = get_cell("overweight"),
+    Obesity = get_cell("obesity")
+  )
+}
+
+table4 <- map_dfr(c("All", race_levels), make_race_bmi_row)
+
+write_csv(table4, "outputs/tables/table4_race_bmi_sedentary.csv")
+
+kable(
+  format_render_table(table4),
+  caption = "Weighted mean sedentary time (hours/day) by race/ethnicity and BMI category, NHANES 2011-2014."
+)
+```
+
+```{=latex}
+\analysispagebreak
+```
+
+## Figure 4
+
+Sleep-cutoff calibration and sedentary-time sensitivity. Survey-weighted mean accelerometer-derived sleep duration and waking sedentary time are shown across candidate sleep-percentage cutoffs. Shaded bands indicate 95% confidence intervals. The vertical dashed line marks the selected `r selected_cutoff`% cutoff, calibrated to the self-reported sleep-duration benchmark.
+
+```{r figure-4-code}
+figure4_df <- sensitivity_results %>%
+  mutate(
+    sleep_ci_l = sleep_mean - qnorm(0.975) * sleep_se,
+    sleep_ci_u = sleep_mean + qnorm(0.975) * sleep_se,
+    sed_ci_l = sed_mean - qnorm(0.975) * sed_se,
+    sed_ci_u = sed_mean + qnorm(0.975) * sed_se
+  )
+
+selected_row <- figure4_df %>%
+  mutate(distance_from_selected = abs(cutoff - selected_cutoff)) %>%
+  slice_min(distance_from_selected, n = 1, with_ties = FALSE) %>%
+  slice(1)
+
+primary_sleep_mean <- as.numeric(best_cutoff$sleep_mean[1])
+primary_sed_mean <- as.numeric(coef(overall_sed)[1])
+sed_label_y <- min(figure4_df$sed_ci_l, na.rm = TRUE) + 0.08
+
+fig4_theme <- theme_classic(base_size = 18) +
+  theme(
+    plot.title = element_text(face = "bold", size = 18, hjust = 0),
+    plot.tag = element_text(face = "bold", size = 22),
+    axis.title = element_text(face = "bold", size = 16),
+    axis.text = element_text(face = "bold", size = 13, color = "black"),
+    axis.line = element_line(linewidth = 1.1, color = "black"),
+    axis.ticks = element_line(linewidth = 1.1, color = "black"),
+    axis.ticks.length = unit(0.16, "cm"),
+    legend.position = "none"
+  )
+
+sleep_panel <- ggplot(figure4_df, aes(x = cutoff, y = sleep_mean)) +
+  annotate("rect", xmin = selected_cutoff - 1.25, xmax = selected_cutoff + 1.25, ymin = -Inf, ymax = Inf, fill = "#8B1E2D", alpha = 0.08) +
+  geom_ribbon(aes(ymin = sleep_ci_l, ymax = sleep_ci_u), fill = "#D9E8F5", alpha = 0.95) +
+  geom_line(color = "#2F5F98", linewidth = 1.55) +
+  geom_point(aes(x = selected_cutoff, y = primary_sleep_mean), color = "#2F5F98", fill = "white", shape = 21, stroke = 1.3, size = 3.8) +
+  geom_hline(yintercept = self_sleep_mean, color = "#8B1E2D", linewidth = 1.1, linetype = "dashed") +
+  geom_vline(xintercept = selected_cutoff, color = "#8B1E2D", linewidth = 1.1, linetype = "dashed") +
+  annotate("text", x = selected_cutoff - 1.4, y = self_sleep_mean, label = "Self-reported sleep mean", hjust = 1, vjust = -0.5, color = "#8B1E2D", fontface = "bold", size = 4.5) +
+  annotate("text", x = selected_cutoff, y = primary_sleep_mean, label = paste0(selected_cutoff, "%"), hjust = -0.2, vjust = 1.7, color = "#8B1E2D", fontface = "bold", size = 4.6) +
+  scale_x_continuous(breaks = seq(30, 100, 10), limits = c(25, 100)) +
+  scale_y_continuous(limits = range(c(figure4_df$sleep_ci_l, figure4_df$sleep_ci_u, self_sleep_ci), na.rm = TRUE) + c(-0.15, 0.25), expand = expansion(mult = c(0, 0))) +
+  labs(tag = "A", title = "Sleep calibration", x = "Sleep cutoff (%)", y = "Sleep (h/day)") +
+  fig4_theme
+
+sed_panel <- ggplot(figure4_df, aes(x = cutoff, y = sed_mean)) +
+  annotate("rect", xmin = selected_cutoff - 1.25, xmax = selected_cutoff + 1.25, ymin = -Inf, ymax = Inf, fill = "#8B1E2D", alpha = 0.08) +
+  geom_ribbon(aes(ymin = sed_ci_l, ymax = sed_ci_u), fill = "#E8DFF4", alpha = 0.95) +
+  geom_line(color = "#7B3FC6", linewidth = 1.55) +
+  geom_point(aes(x = selected_cutoff, y = primary_sed_mean), color = "#7B3FC6", fill = "white", shape = 21, stroke = 1.3, size = 3.8) +
+  geom_vline(xintercept = selected_cutoff, color = "#8B1E2D", linewidth = 1.1, linetype = "dashed") +
+  annotate("text", x = selected_cutoff - 2.2, y = sed_label_y, label = paste0(format_decimal(primary_sed_mean, 2), " h/day"), hjust = 1, vjust = 0, color = "#7B3FC6", fontface = "bold", size = 4.6) +
+  annotate("text", x = selected_cutoff, y = max(figure4_df$sed_ci_u, na.rm = TRUE), label = paste0(selected_cutoff, "% cutoff"), hjust = 1.05, vjust = 1.3, color = "#8B1E2D", fontface = "bold", size = 4.6) +
+  scale_x_continuous(breaks = seq(30, 100, 10), limits = c(25, 100)) +
+  scale_y_continuous(limits = range(c(figure4_df$sed_ci_l, figure4_df$sed_ci_u), na.rm = TRUE) + c(-0.12, 0.18), expand = expansion(mult = c(0, 0))) +
+  labs(tag = "B", title = "Sensitivity", x = "Sleep cutoff (%)", y = "Sedentary (h/day)") +
+  fig4_theme
+
+figure4 <- sleep_panel / sed_panel + plot_layout(heights = c(1, 1))
+
+ggsave("figures/manuscript/cutoff_sensi.png", figure4, width = 10.5, height = 8.8, dpi = 600, bg = "white")
+ggsave("figures/manuscript/cutoff_sensi.pdf", figure4, width = 10.5, height = 8.8, bg = "white")
+```
+
+```{r figure-4, fig.cap=paste0("Sleep-cutoff calibration and sedentary-time sensitivity. Survey-weighted mean accelerometer-derived sleep duration and waking sedentary time are shown across candidate sleep-percentage cutoffs. Shaded bands indicate 95% confidence intervals. The vertical dashed line marks the selected ", selected_cutoff, "% cutoff, calibrated to the self-reported sleep-duration benchmark."), out.width="82%", echo=FALSE}
+figure4
+```
+
+```{=latex}
+\analysispagebreak
+```
+
+## Output Index
+
+```{r output-index}
+tibble::tribble(
+  ~Output, ~Path,
+  "Table 1", "outputs/tables/table1_wear_day_distribution.csv",
+  "Table 2", "outputs/tables/table2_study_comparison.csv",
+  "Table 3", "outputs/tables/table3_age_gender_sedentary.csv",
+  "Table 4", "outputs/tables/table4_race_bmi_sedentary.csv",
+  "Main results", "outputs/results/main_results.csv",
+  "Demographic missingness", "outputs/qc/demographic_missingness.csv",
+  "Cutoff sensitivity grid", "outputs/cutoff/cutoff_sensitivity_grid.csv",
+  "Objective curve", "outputs/cutoff/objective_curve.csv",
+  "Selected cutoff", "outputs/cutoff/selected_cutoff.csv",
+  "Analytic participant sedentary data", "outputs/datasets/analytic_participant_sedentary.csv",
+  "Analytic participant sedentary documentation", "outputs/documentation/analytic_participant_sedentary_documentation.txt",
+  "Analytic epoch sedentary data", "outputs/datasets/analytic_epoch_sedentary.csv",
+  "Analytic epoch sedentary documentation", "outputs/documentation/analytic_epoch_sedentary_documentation.txt",
+  "Figure 1", "figures/manuscript/fig1.png",
+  "Figure 2", "figures/manuscript/figure2_hourly_daytype.png",
+  "Figure 3", "figures/manuscript/sedentary_distribution_with_24h_composition.png",
+  "Figure 4", "figures/manuscript/cutoff_sensi.png"
+) %>%
+  kable(caption = "Manuscript output index.")
+```

@@ -4,12 +4,19 @@
 .Ruserdata
 .DS_Store
 manuscript_main.html
+.Rproj
+
 
 # Keep only the data inputs actually used by the analysis in version control.
 data/*
-!data/top_level_data/
-!data/top_level_data/**
+!data/analysis_ready_1h_epoch/
+!data/analysis_ready_1h_epoch/**
+!data/analysis_ready_30m_epoch/
+!data/analysis_ready_30m_epoch/**
+!data/top_level_data_1h_epoch/
+!data/top_level_data_1h_epoch/**
 data/top_level_data/**/.DS_Store
+data/top_level_data_1h_epoch/**/.DS_Store
 !data/nosleep_data.csv.gz
 !data/wrist_df.csv.gz
 !data/sleep_est_data.csv.gz

@@ -29,7 +29,7 @@ find_project_root <- function(start = getwd()) {
 
 root <- find_project_root()
 data_dir <- file.path(root, "data")
-fig_dir <- file.path(root, "figures")
+fig_dir <- file.path(root, "figures", "manuscript")
 
 options(survey.lonely.psu = "adjust")
 
@@ -272,7 +272,7 @@ sleep_panel <- ggplot(figure5_df, aes(x = cutoff, y = sleep_mean)) +
     y = selected_row$sleep_mean,
     label = paste0(selected_cutoff, "%"),
     hjust = -0.2,
-    vjust = 1.7,
+    vjust = -1.7,
     color = "#8B1E2D",
     fontface = "bold",
     size = 4.6
