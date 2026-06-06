@@ -957,6 +957,29 @@ des_best <- svydesign(
 analytic_df <- model_df_best
 analytic_design <- des_best
 
+get_main_results <- function(design_obj) {
+  estimates <- list(
+    "Waking sedentary time" = svymean(~mean_sed_hours, design_obj, na.rm = TRUE),
+    "Waking time" = svymean(~mean_wake_hours, design_obj, na.rm = TRUE),
+    "Sleep/nonwear time" = svymean(~mean_sleep_hours, design_obj, na.rm = TRUE)
+  )
+
+  imap_dfr(
+    estimates,
+    function(estimate, measure) {
+      ci <- confint(estimate)
+      tibble(
+        Measure = measure,
+        `Mean (h/day)` = coef(estimate)[1],
+        SE = SE(estimate)[1],
+        `95% CI lower` = ci[1, 1],
+        `95% CI upper` = ci[1, 2]
+      )
+    }
+  ) %>%
+    mutate(across(where(is.numeric), ~round(.x, 4)))
+}
+
 overall_sed <- svymean(~mean_sed_hours, des_best, na.rm = TRUE)
 overall_sed_ci <- confint(overall_sed)
 overall_wake <- svymean(~mean_wake_hours, des_best, na.rm = TRUE)
@@ -964,36 +987,26 @@ overall_wake_ci <- confint(overall_wake)
 overall_sleep <- svymean(~mean_sleep_hours, des_best, na.rm = TRUE)
 overall_sleep_ci <- confint(overall_sleep)
 
-main_results <- tibble(
-  Measure = c(
-    "Waking sedentary time",
-    "Waking time",
-    "Sleep/nonwear time"
-  ),
-  `Mean (h/day)` = c(
-    coef(overall_sed)[1],
-    coef(overall_wake)[1],
-    coef(overall_sleep)[1]
-  ),
-  SE = c(
-    SE(overall_sed)[1],
-    SE(overall_wake)[1],
-    SE(overall_sleep)[1]
-  ),
-  `95% CI lower` = c(
-    overall_sed_ci[1, 1],
-    overall_wake_ci[1, 1],
-    overall_sleep_ci[1, 1]
-  ),
-  `95% CI upper` = c(
-    overall_sed_ci[1, 2],
-    overall_wake_ci[1, 2],
-    overall_sleep_ci[1, 2]
-  )
+main_results <- get_main_results(des_best)
+analysis_group_levels <- c("Pooled", "Cycle 2011-2012", "Cycle 2013-2014")
+
+cycle_main_results <- bind_rows(
+  "Pooled" = main_results,
+  "Cycle 2011-2012" = get_main_results(subset(des_best, Dataset == "2011-2012")),
+  "Cycle 2013-2014" = get_main_results(subset(des_best, Dataset == "2013-2014")),
+  .id = "Analysis group"
 ) %>%
-  mutate(across(where(is.numeric), ~round(.x, 4)))
+  mutate(`Analysis group` = factor(`Analysis group`, levels = analysis_group_levels)) %>%
+  arrange(`Analysis group`)
+
+cycle_main_results_table <- cycle_main_results %>%
+  mutate(`Analysis group` = as.character(`Analysis group`)) %>%
+  group_by(`Analysis group`) %>%
+  mutate(`Analysis group` = if_else(row_number() == 1, `Analysis group`, "")) %>%
+  ungroup()
 
 write_csv(format_export_numbers(main_results), "outputs/results/main_results.csv")
+write_csv(format_export_numbers(cycle_main_results), "outputs/results/main_results_by_cycle.csv")
 
 sleep_aware_epoch_df <- sleep_sed_df %>%
   filter(percent_sleep < selected_cutoff)
@@ -1016,6 +1029,14 @@ kable(
   main_results,
   digits = 2,
   caption = "Main survey-weighted estimates at the selected sleep/nonwear cutoff."
+)
+```
+
+```{r main-results-by-cycle-table}
+kable(
+  cycle_main_results_table,
+  digits = 2,
+  caption = "Main survey-weighted estimates at the selected sleep/nonwear cutoff, overall and by NHANES cycle."
 )
 ```
 
@@ -1156,7 +1177,7 @@ The analysis proceeded in the following steps:
 
 4. **Identify sleep and non-wear in 30-second epochs.** The SWaN model classified each 30-second epoch as wake wear, sleep, or non-wear. For example, one hour contains 120 30-second epochs, and those epochs were used to describe how much of the hour was sleep or non-wear.
 
-5. **Summarize predictions for analysis.** The epoch-level predictions were converted to `r ifelse(analysis_epoch == "30m", "30-minute", "hourly")` percentages for the primary analysis. Figure 2 aggregates the analysis records to hours so hourly patterns are displayed consistently across epoch choices.
+5. **Summarize predictions for analysis.** The 10-second sitting predictions and 30-second sleep/non-wear predictions were aggregated into new `r ifelse(analysis_epoch == "30m", "30-minute", "hourly")` epoch-level summaries for each participant-day. For example, a `r ifelse(analysis_epoch == "30m", "30-minute", "1-hour")` analysis epoch contains `r ifelse(analysis_epoch == "30m", "180", "360")` 10-second sitting predictions and `r ifelse(analysis_epoch == "30m", "60", "120")` 30-second sleep/non-wear predictions; these were summarized as the percentage of the epoch classified as sitting and the percentage classified as sleep/non-wear.
 
 6. **Choose the sleep/non-wear cutoff.** Candidate cutoffs were evaluated by comparing survey-weighted accelerometer-derived sleep duration with NHANES self-reported sleep duration. The cutoff with the smallest absolute difference was selected for the primary waking sedentary-time analysis. This cutoff is a practical rule for classifying accelerometer summaries, not an exact biological boundary.
 
@@ -1603,6 +1624,7 @@ tibble::tribble(
   "Table 3", "outputs/tables/table3_age_gender_sedentary.csv",
   "Table 4", "outputs/tables/table4_race_bmi_sedentary.csv",
   "Main results", "outputs/results/main_results.csv",
+  "Main results by cycle", "outputs/results/main_results_by_cycle.csv",
   "Demographic missingness", "outputs/qc/demographic_missingness.csv",
   "Cutoff sensitivity grid", "outputs/cutoff/cutoff_sensitivity_grid.csv",
   "Objective curve", "outputs/cutoff/objective_curve.csv",
