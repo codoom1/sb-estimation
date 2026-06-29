@@ -1,0 +1,195 @@
+Final Analysis and Data Package Work Plan
+=========================================
+
+This document summarizes the planned data products, final analysis report, and
+repository organization for the NHANES 2011-2014 wrist accelerometer sedentary
+time paper.
+
+
+Data Package
+============
+
+Goal
+----
+
+Create an R data package that gives users access to the epoch-level and
+participant-level datasets used in the paper. The package should support both
+the primary analysis and sensitivity analyses.
+
+The package is now available at:
+
+https://github.com/codoom1/wristsed
+
+
+Epoch-Level Datasets
+--------------------
+
+Epoch resolutions:
+
+- 10 minutes
+- 30 minutes
+- 1 hour
+
+The 1-hour epoch is the primary analysis epoch used in the paper.
+
+Core epoch-level columns:
+
+- ID
+- Day
+- DayType
+- Epoch
+- percent_sedentary
+- percent_sleep_nonwear
+- percent_wake
+
+Here, percent refers to the percentage of each epoch classified as sedentary,
+sleep/non-wear, or wake/wear.
+
+The 10-minute epoch files are derived from the source prediction data. The
+30-minute and 1-hour files can then be created from the lower-resolution
+summaries using duration-weighted aggregation.
+
+
+Participant-Level Datasets
+--------------------------
+
+Participant-level datasets summarize each participant's usual daily waking
+sedentary time after sleep/non-wear removal at the primary analysis epoch.
+
+Core participant-level columns:
+
+- ID
+- no_of_valid_days
+- est_sedentary_hours
+- sd_est_sedentary_hours
+- se_est_sedentary_hours
+- est_waking_hours
+- sd_waking_hours
+- se_waking_hours
+- est_sleep_nonwear_hours
+- sd_sleep_nonwear_hours
+- se_sleep_nonwear_hours
+
+Participants with only one valid day will not have a meaningful within-person
+standard deviation or standard error. These values should remain missing rather
+than be imputed.
+
+
+Sleep/Wake Classification Methods
+---------------------------------
+
+The package should support two sleep/wake classification methods:
+
+- SWaN sleep/wake/non-wear classification
+- NHANES 1-minute sleep-state classification
+
+The default should match the paper's primary analysis: SWaN sleep/wake/non-wear
+classification at the 1-hour epoch level.
+
+Users should be able to request data by specifying:
+
+- sleep/wake classification method
+- epoch resolution
+- data level: epoch or participant
+
+
+Data Documentation
+------------------
+
+Each dataset should include a clear data dictionary with:
+
+- data source
+- purpose and recommended use case
+- column descriptions
+- sleep/wake classification method
+- epoch resolution
+- citations
+- notes on missing values and valid-day requirements
+
+
+Final Paper Analysis
+====================
+
+Goal
+----
+
+Create one final reproducible R Markdown report for the manuscript analysis.
+The final report should rely on the 1-hour SWaN epoch dataset for the primary
+analysis and use the alternative epoch resolutions and sleep algorithms for
+sensitivity analyses.
+
+
+Primary Analysis
+----------------
+
+The primary analysis uses:
+
+- 1-hour epoch resolution
+- SWaN sleep/wake/non-wear classification
+- calibrated sleep/non-wear cutoff
+- participant-level NHANES survey-weighted estimates
+
+
+Epoch Sensitivity Table
+-----------------------
+
+Add a sensitivity table comparing estimates across sleep/wake classification
+methods and epoch resolutions.
+
+Panels:
+
+- SWaN
+- NHANES
+
+Rows within each panel:
+
+- Direct states
+- 10-minute epoch
+- 30-minute epoch
+- 1-hour epoch
+
+Columns:
+
+- Cutoff
+- Mean sedentary hours
+- Mean waking hours
+- Mean sleep/non-wear hours
+
+For direct-state rows, sleep/non-wear removal is based directly on the native
+sleep/wake states, so no cutoff is applied. The cutoff column should use a dash
+for these rows.
+
+
+Figure and Terminology Updates
+------------------------------
+
+Use sedentary/non-sedentary terminology consistently throughout the final
+report and figures.
+
+Specific updates:
+
+- Workflow figure: replace sitting/non-sitting language with
+  sedentary/non-sedentary.
+- Hourly figure: keep the waking sedentary plot as the final hourly figure.
+- Sedentary-time distribution figure: replace any remaining sitting language
+  with sedentary language.
+- Legend text: use "Non-sedentary" instead of "Other waking time."
+
+
+Repository Organization
+=======================
+
+The final repository should provide a clean, user-facing analysis pipeline.
+
+Recommended structure:
+
+- `R/`: scripts for rendering the report and creating supporting figures
+- `reports/source/`: source R Markdown files
+- `reports/rendered/`: rendered HTML and PDF reports
+- `outputs/final_analysis/`: final tables, results, QC files, and derived CSVs
+- `figures/final_analysis/`: final manuscript and diagnostic figures
+- `data/`: small local files required for calibration and workflow figures
+- `docs/`: planning notes and supporting documentation
+
+The final code should be easy for readers to run from the repository root and
+should avoid duplicate scripts or unused legacy outputs.

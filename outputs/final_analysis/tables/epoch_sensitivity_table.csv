@@ -1,0 +1,9 @@
+Panel,Row,Cutoff,Mean sedentary hours,SE sedentary hours,Mean waking hours,SE waking hours,Mean sleep/nonwear hours,SE sleep/nonwear hours
+SWaN sleep/wake/nonwear algorithm,Direct states,-,6.5243,0.0402,12.0878,0.0595,11.9112,0.0596
+SWaN sleep/wake/nonwear algorithm,10m epoch,90.01,10.9115,0.0469,16.6562,0.0573,7.3438,0.0573
+SWaN sleep/wake/nonwear algorithm,30m epoch,91.67,11.3879,0.0468,17.1334,0.0558,6.8666,0.0558
+SWaN sleep/wake/nonwear algorithm,1h epoch,90.84,11.3492,0.0444,17.0905,0.0525,6.9095,0.0525
+NHANES 1-minute sleep-state algorithm,Direct states,-,7.9701,0.0414,13.6606,0.0582,9.4763,0.0582
+NHANES 1-minute sleep-state algorithm,10m epoch,90.01,11.0523,0.0471,16.7939,0.0589,7.2061,0.0589
+NHANES 1-minute sleep-state algorithm,30m epoch,86.67,11.1099,0.0459,16.8509,0.0565,7.1491,0.0565
+NHANES 1-minute sleep-state algorithm,1h epoch,85.01,11.2126,0.0457,16.9449,0.055,7.0551,0.055

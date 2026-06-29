@@ -1,30 +1,41 @@
-.Rproj.user
-.Rhistory
 .RData
+.Rhistory
+.Rproj.user/
 .Ruserdata
 .DS_Store
-manuscript_main.html
-.Rproj
+**/.DS_Store
+*.Rproj
 
+.mypy_cache/
+tmp_epoch/
+tmp_output/
 
-# Keep only the data inputs actually used by the analysis in version control.
-data/*
-!data/analysis_ready_1h_epoch/
-!data/analysis_ready_1h_epoch/**
-!data/analysis_ready_30m_epoch/
-!data/analysis_ready_30m_epoch/**
-!data/top_level_data_1h_epoch/
-!data/top_level_data_1h_epoch/**
-data/top_level_data/**/.DS_Store
-data/top_level_data_1h_epoch/**/.DS_Store
-!data/nosleep_data.csv.gz
-!data/wrist_df.csv.gz
-!data/sleep_est_data.csv.gz
-!data/self-sleep-2011-12.xpt
-!data/self-sleep-2013-14.xpt
-
-# renv package libraries can be restored from renv.lock
+# renv package libraries can be restored from renv.lock.
 renv/library/
 renv/staging/
+
+# Keep only the data inputs used by the final Rmd.
+data/*
+!data/self-sleep-2011-12.xpt
+!data/self-sleep-2013-14.xpt
+!data/top_level_data_1h_epoch/
+!data/top_level_data_1h_epoch/**
+
+# Keep only the canonical final-analysis outputs.
+outputs/*
+!outputs/final_analysis/
+!outputs/final_analysis/**
+
+figures/*
+!figures/final_analysis/
+!figures/final_analysis/**
+
+reports/rendered/*
+!reports/rendered/final_analysis.html
+!reports/rendered/final_analysis.pdf
+
+# Legacy/local processing material.
+cluster/
+maintainer/
+model=CHAP/
 lme4/
-docs/
