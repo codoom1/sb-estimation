@@ -1,5 +1,7 @@
 .RData
 .Rhistory
+.Rprofile
+.Renviron
 .Rproj.user/
 .Ruserdata
 .DS_Store
