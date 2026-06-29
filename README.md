@@ -10,6 +10,27 @@ It offers:
 - final CSV outputs used by the report;
 - the small local files needed for sleep calibration and the workflow figure.
 
+## Paper
+
+**Sedentary Behavior in the United States Measured by Accelerometer, NHANES
+2011-2014**
+
+Authors:
+
+- Christopher Odoom
+- John Staudenmayer
+- Additional coauthors to be added
+
+Affiliation:
+
+- Department of Mathematics and Statistics, University of Massachusetts,
+  Amherst, MA
+
+Funding:
+
+This study was funded by the National Institutes of Health
+(NIH 5R01HL1685355-02).
+
 ## Repository Contents
 
 ```text
@@ -113,3 +134,9 @@ Final figure files are under:
 ```text
 figures/final_analysis/
 ```
+
+## Citation
+
+Odoom C, Staudenmayer J, additional coauthors to be added. Sedentary Behavior
+in the United States Measured by Accelerometer, NHANES 2011-2014. Manuscript in
+preparation.
