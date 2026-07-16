@@ -500,7 +500,7 @@ objective_plot <- ggplot(objective_curve, aes(x = cutoff, y = diff)) +
   geom_vline(xintercept = selected_cutoff, color = "#8B1E2D", linewidth = 0.9, linetype = "dashed") +
   scale_x_continuous(breaks = seq(50, 100, 10), limits = c(50, 100)) +
   labs(
-    x = "Sleep/nonwear cutoff (%)",
+    x = "Sleep Cutoff %",
     y = "Absolute difference from self-report (h/day)"
   ) +
   theme_classic(base_size = 13)
@@ -568,6 +568,41 @@ cycle_estimate_table <- cycle_main_results %>%
   ) %>%
   select(`Analysis group`, Measure, `Mean (h/day)`, SE, `95% CI`)
 
+get_composition_results <- function(design_obj) {
+  bind_rows(
+    survey_mean_row(design_obj, "est_sedentary_hours", "Mean sedentary time"),
+    survey_mean_row(
+      design_obj,
+      "I(24 - est_sedentary_hours - est_sleep_nonwear_hours)",
+      "Non-sedentary time"
+    ),
+    survey_mean_row(design_obj, "est_sleep_nonwear_hours", "Sleep/non-wear time")
+  )
+}
+
+composition_cycle_results <- bind_rows(
+  "Pooled" = get_composition_results(analytic_design),
+  "Cycle 2011-2012" = get_composition_results(subset(analytic_design, Dataset == "2011-2012")),
+  "Cycle 2013-2014" = get_composition_results(subset(analytic_design, Dataset == "2013-2014")),
+  .id = "Analysis group"
+)
+
+composition_cycle_table <- composition_cycle_results %>%
+  mutate(
+    `Analysis group` = recode(
+      `Analysis group`,
+      "Pooled" = "Pooled",
+      "Cycle 2011-2012" = "2011-2012 cycle",
+      "Cycle 2013-2014" = "2013-2014 cycle"
+    ),
+    `95% CI` = paste0(
+      format_decimal(`95% CI lower`, 2),
+      "-",
+      format_decimal(`95% CI upper`, 2)
+    )
+  ) %>%
+  select(`Analysis group`, Measure, `Mean (h/day)`, SE, `95% CI`)
+
 write_csv(
   format_export_numbers(main_results),
   file.path(output_root, "results", "main_results.csv")
@@ -579,6 +614,10 @@ write_csv(
 write_csv(
   format_export_numbers(cycle_estimate_table),
   file.path(output_root, "results", "main_estimates_by_cycle_table.csv")
+)
+write_csv(
+  format_export_numbers(composition_cycle_table),
+  file.path(output_root, "results", "main_estimates_by_cycle_table_24h_composition.csv")
 )
 
 overall_sed <- svymean(~est_sedentary_hours, analytic_design, na.rm = TRUE)
@@ -599,6 +638,19 @@ paper_kable(
   latex_size = "\\scriptsize"
 )
 ```
+
+```{r main-estimates-by-cycle-composition-table}
+paper_kable(
+  composition_cycle_table,
+  caption = "Main survey-weighted estimates overall and by NHANES cycle with non-sedentary time.",
+  align = c("l", "l", "r", "r", "r"),
+  latex_size = "\\scriptsize"
+)
+```
+
+Note. In the alternative table, non-sedentary time is calculated as 24 hours
+minus sedentary time minus sleep/non-wear time, so the three estimates sum to a
+24-hour day within each analysis group.
 
 Note. Estimates are survey-weighted and expressed in hours per day. SE = standard
 error; CI = confidence interval. Pooled estimates combine the 2011-2012 and
@@ -690,6 +742,48 @@ influence than participants with fewer records. That would change the estimand
 from a population mean across people to a record-weighted mean across observed
 person-epochs or person-days.
 
+### NHANES Sleep/Wake/Nonwear Algorithm
+
+The NHANES comparison analysis used an open-source algorithm applied to the raw
+80 Hz wrist accelerometer signal to classify each monitored period as wake
+wear, sleep wear, non-wear, or unknown. The algorithm also assigned a confidence
+score from 0.0 to 1.0 for each possible class. Most records received a
+minute-level classification, but periods were left as unknown when the algorithm
+could not assign a class with sufficient certainty.
+
+The algorithm worked in three main steps. First, it summarized the raw
+acceleration signal in short windows and used machine learning to classify each
+30-second interval as wake wear, sleep wear, or non-wear. The features included
+movement and orientation information, such as signal power, variability in
+device orientation, and changes in orientation. The 30-second interval was used
+because the sleep-validation data were scored against polysomnography in
+30-second sleep/wake epochs.
+
+This first step also addressed the accelerometer's idle sleep mode. Idle sleep
+mode is a battery-saving feature that can remove useful low-movement signal
+information. When idle sleep mode occurred, the algorithm replaced the missing
+idle-mode signal with the 10 seconds of accelerometer data immediately before
+idle sleep mode began. This copied segment represented the participant's
+low-movement pattern just before the device entered idle mode. Although this is
+only an approximation, validation testing suggested that it improved the
+algorithm's ability to distinguish quiet waking behavior, sleep, and non-wear.
+
+Second, the algorithm smoothed very short predicted periods. Wake-wear periods
+shorter than 3 minutes, sleep-wear periods shorter than 10 minutes, and non-wear
+periods shorter than 10 minutes were reconsidered using the classifications and
+confidence scores from the periods immediately before and after them. If both
+neighboring periods had the same class and their combined confidence was much
+stronger than the confidence for the short middle period, the middle period was
+changed to match its neighbors. If the neighboring periods had different
+classes, the short middle period was changed to match the neighbor with the
+higher confidence.
+
+Third, the algorithm reviewed longer intervals using changes in device
+orientation. This step allowed some longer periods to be reclassified between
+sleep and non-wear. The purpose was to preserve sleep periods that included
+occasional body reorientation, which is commonly observed when people change
+position in bed during sleep.
+
 ## Table 1
 
 ```{r table-1}
@@ -752,12 +846,82 @@ initiation and return days are excluded.
 ## Epoch Sensitivity Table
 
 ```{r epoch-sensitivity}
-direct_state_row <- function(method_label, sleep_method) {
-  person <- participant_from_direct_state(read_epoch(sleep_method, "10m"), sleep_method)
+analysis_epoch_specs <- tibble(
+  epoch_level = c("10m", "30m", "1h", "90m", "120m", "150m", "180m"),
+  minutes = c(10, 30, 60, 90, 120, 150, 180),
+  label = c(
+    "10-min epoch",
+    "30-min epoch",
+    "1-hour epoch",
+    "1-hour 30-min epoch",
+    "2-hour epoch",
+    "2-hour 30-min epoch",
+    "3-hour epoch"
+  )
+)
+
+analysis_epoch_cache <- new.env(parent = emptyenv())
+
+read_cached_epoch <- function(sleep_method, epoch_level) {
+  cache_key <- paste(sleep_method, epoch_level, sep = "_")
+  if (!exists(cache_key, envir = analysis_epoch_cache, inherits = FALSE)) {
+    assign(cache_key, read_epoch(sleep_method, epoch_level), envir = analysis_epoch_cache)
+  }
+  get(cache_key, envir = analysis_epoch_cache, inherits = FALSE)
+}
+
+aggregate_analysis_epoch <- function(epoch_df, minutes, epoch_level) {
+  percent_columns <- c(
+    "percent_sedentary",
+    "percent_waking_sedentary",
+    "percent_sleep_nonwear",
+    "percent_wake",
+    "percent_missing_sleep"
+  )
+
+  weighted_percent <- function(x, duration) {
+    if (all(is.na(x))) return(NA_real_)
+    weighted.mean(x, duration, na.rm = TRUE)
+  }
+
+  epoch_df %>%
+    mutate(
+      Epoch = floor(epoch_start_minute / minutes) + 1L,
+      source_duration_minutes = epoch_duration_minutes
+    ) %>%
+    group_by(ID, Dataset, Day, DayType, Epoch, sleep_method) %>%
+    summarise(
+      epoch_level = .env$epoch_level,
+      epoch_start_minute = min(epoch_start_minute, na.rm = TRUE),
+      epoch_duration_minutes = sum(source_duration_minutes, na.rm = TRUE),
+      across(all_of(percent_columns), ~weighted_percent(.x, source_duration_minutes)),
+      n_source_epochs = sum(n_source_epochs, na.rm = TRUE),
+      expected_source_epochs = sum(expected_source_epochs, na.rm = TRUE),
+      source_coverage = n_source_epochs / expected_source_epochs,
+      .groups = "drop"
+    )
+}
+
+read_analysis_epoch <- function(sleep_method, epoch_level) {
+  if (epoch_level %in% c("10m", "30m", "1h")) {
+    if (sleep_method == "swan" && epoch_level == "1h") return(primary_epoch)
+    if (epoch_level %in% c("10m", "30m")) return(read_cached_epoch(sleep_method, epoch_level))
+    return(read_epoch(sleep_method, epoch_level))
+  }
+
+  minutes <- analysis_epoch_specs %>%
+    filter(epoch_level == .env$epoch_level) %>%
+    pull(minutes)
+
+  aggregate_analysis_epoch(read_cached_epoch(sleep_method, "30m"), minutes, epoch_level)
+}
+
+direct_state_row <- function(method_label, sleep_method, source_epoch_label) {
+  person <- participant_from_direct_state(read_cached_epoch(sleep_method, "10m"), sleep_method)
   estimates <- estimate_three_means(person)
   tibble(
     Panel = method_label,
-    Row = "Direct states",
+    Row = paste0("Direct states (", source_epoch_label, ")"),
     Cutoff = "-",
     `Mean sedentary hours` = estimates$mean_sedentary_hours,
     `SE sedentary hours` = estimates$se_sedentary_hours,
@@ -769,16 +933,16 @@ direct_state_row <- function(method_label, sleep_method) {
 }
 
 epoch_sensitivity_rows <- function(method_label, sleep_method) {
-  map_dfr(c("10m", "30m", "1h"), function(epoch_level) {
-    epoch_df <- if (sleep_method == "swan" && epoch_level == "1h") {
-      primary_epoch
-    } else {
-      read_epoch(sleep_method, epoch_level)
-    }
+  rows <- vector("list", nrow(analysis_epoch_specs))
+
+  for (i in seq_len(nrow(analysis_epoch_specs))) {
+    epoch_level <- analysis_epoch_specs$epoch_level[[i]]
+    label <- analysis_epoch_specs$label[[i]]
+    epoch_df <- read_analysis_epoch(sleep_method, epoch_level)
     selected <- select_cutoff_for_epoch(epoch_df, sleep_method, self_sleep_mean)
-    tibble(
+    rows[[i]] <- tibble(
       Panel = method_label,
-      Row = paste(epoch_level, "epoch"),
+      Row = label,
       Cutoff = format_decimal(selected$cutoff, 2),
       `Mean sedentary hours` = selected$mean_sedentary_hours,
       `SE sedentary hours` = selected$se_sedentary_hours,
@@ -787,13 +951,18 @@ epoch_sensitivity_rows <- function(method_label, sleep_method) {
       `Mean sleep/nonwear hours` = selected$mean_sleep_nonwear_hours,
       `SE sleep/nonwear hours` = selected$se_sleep_nonwear_hours
     )
-  })
+
+    rm(epoch_df, selected)
+    invisible(gc())
+  }
+
+  bind_rows(rows)
 }
 
 sensitivity_table <- bind_rows(
-  direct_state_row("SWaN sleep/wake/nonwear algorithm", "swan"),
+  direct_state_row("SWaN sleep/wake/nonwear algorithm", "swan", "10-sec epoch"),
   epoch_sensitivity_rows("SWaN sleep/wake/nonwear algorithm", "swan"),
-  direct_state_row("NHANES 1-minute sleep-state algorithm", "nhanes"),
+  direct_state_row("NHANES 1-minute sleep-state algorithm", "nhanes", "1-min epoch"),
   epoch_sensitivity_rows("NHANES 1-minute sleep-state algorithm", "nhanes")
 )
 
@@ -816,7 +985,7 @@ paper_kable(
       Waking = format_mean_se(`Mean waking hours`, `SE waking hours`),
       `Sleep/nonwear` = format_mean_se(`Mean sleep/nonwear hours`, `SE sleep/nonwear hours`)
     ),
-  caption = "Epoch-level sensitivity analysis by sleep/wake detection algorithm.",
+  caption = "Analysis epoch sensitivity analysis by sleep/wake detection algorithm.",
   latex_size = "\\scriptsize"
 )
 ```
@@ -1240,6 +1409,75 @@ knitr::include_graphics(
 )
 ```
 
+## Figure 3 Alternative
+
+This version keeps the same 24-hour composition but labels the sleep/nonwear
+component as Sleep in the legend.
+
+```{r figure-3-sleep-label, fig.width=8, fig.height=3.8, out.width="100%"}
+right_df_sleep_label <- right_df %>%
+  rename(Sleep = `Sleep/nonwear`)
+
+right_df_long_sleep_label <- right_df_sleep_label %>%
+  pivot_longer(
+    cols = c(Sleep, Sedentary, `Non-sedentary`),
+    names_to = "behavior",
+    values_to = "hours"
+  ) %>%
+  mutate(behavior = factor(behavior, levels = c("Sleep", "Sedentary", "Non-sedentary")))
+
+right_label_df_sleep_label <- right_df_sleep_label %>%
+  pivot_longer(
+    cols = c(`Non-sedentary`, Sedentary, Sleep),
+    names_to = "behavior",
+    values_to = "hours"
+  ) %>%
+  group_by(sed_bin) %>%
+  mutate(
+    x_mid = cumsum(hours) - hours / 2,
+    percent_label = ifelse(hours >= 1.2, percent(hours / 24, accuracy = 1), ""),
+    label_color = ifelse(behavior %in% c("Non-sedentary", "Sedentary"), "white", "black")
+  ) %>%
+  ungroup()
+
+right_plot_sleep_label <- ggplot(right_df_long_sleep_label, aes(x = hours, y = sed_bin, fill = behavior)) +
+  geom_col(width = 0.72, color = "white", linewidth = 0.65) +
+  geom_text(
+    data = right_label_df_sleep_label,
+    aes(x = x_mid, y = sed_bin, label = percent_label, color = label_color),
+    inherit.aes = FALSE,
+    size = 4.25,
+    fontface = "bold"
+  ) +
+  scale_fill_manual(values = c("Sleep" = "#9ECAE1", "Sedentary" = "#4E79A7", "Non-sedentary" = "#59A14F")) +
+  scale_color_identity(guide = "none") +
+  guides(fill = guide_legend(reverse = TRUE)) +
+  scale_x_continuous(breaks = seq(0, 24, by = 4), expand = expansion(mult = c(0, 0.02))) +
+  coord_cartesian(xlim = c(0, 24), clip = "off") +
+  labs(x = "Hours/day", y = "Sedentary time (h/day)", fill = NULL, tag = "B") +
+  figure3_theme +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.grid.major.x = element_line(color = "grey86", linewidth = 0.45),
+    legend.position = "bottom",
+    legend.text = element_text(size = 13, face = "bold")
+  )
+
+figure3_sleep_label <- left_plot + right_plot_sleep_label +
+  plot_layout(widths = c(1.55, 1.35), guides = "collect") &
+  theme(
+    legend.position = "bottom",
+    plot.tag = element_text(face = "bold", size = 22),
+    plot.tag.position = c(0.02, 0.98)
+  )
+
+save_final_figure(figure3_sleep_label, "sedentary_distribution_with_24h_composition_sleep_label", width = 12.8, height = 5.8)
+knitr::include_graphics(
+  normalizePath(file.path(figure_root, "sedentary_distribution_with_24h_composition_sleep_label.png"), winslash = "/", mustWork = TRUE),
+  rel_path = FALSE
+)
+```
+
 ## Table 3
 
 ```{r table-3}
@@ -1385,7 +1623,10 @@ sleep_distribution_plot <- ggplot(sleep_distribution, aes(x = sleep_bin, y = per
     color = "black"
   ) +
   scale_y_continuous(labels = percent_format(scale = 1), expand = expansion(mult = c(0, 0.12))) +
-  scale_fill_manual(values = c("Self-reported sleep" = "#8B1E2D", "Accelerometer sleep/nonwear" = "#2F5F98")) +
+  scale_fill_manual(
+    values = c("Self-reported sleep" = "#8B1E2D", "Accelerometer sleep/nonwear" = "#2F5F98"),
+    labels = c("Self-reported sleep", "Accelerometer sleep")
+  ) +
   labs(x = "Sleep duration (h/day)", y = "Participants (%)", fill = NULL) +
   theme_bw(base_size = 13) +
   theme(legend.position = "bottom")
@@ -1449,7 +1690,7 @@ sleep_panel <- ggplot(figure4_df, aes(x = cutoff, y = sleep_mean)) +
     size = 4
   ) +
   scale_x_continuous(breaks = seq(50, 100, 10), limits = c(50, 100)) +
-  labs(tag = "A", title = "Sleep calibration", x = "Sleep/nonwear cutoff (%)", y = "Sleep/nonwear (h/day)") +
+  labs(tag = "A", title = "Sleep calibration", x = "Sleep Cutoff %", y = "Sleep (h/day)") +
   fig4_theme
 
 sed_panel <- ggplot(figure4_df, aes(x = cutoff, y = sed_mean)) +
@@ -1470,7 +1711,7 @@ sed_panel <- ggplot(figure4_df, aes(x = cutoff, y = sed_mean)) +
     size = 4
   ) +
   scale_x_continuous(breaks = seq(50, 100, 10), limits = c(50, 100)) +
-  labs(tag = "B", title = "Sedentary-time sensitivity", x = "Sleep/nonwear cutoff (%)", y = "Sedentary (h/day)") +
+  labs(tag = "B", title = "Sedentary-time sensitivity", x = "Sleep Cutoff %", y = "Sedentary (h/day)") +
   fig4_theme
 
 figure4 <- sleep_panel / sed_panel + plot_layout(heights = c(1, 1))
@@ -1490,6 +1731,7 @@ output_index <- tibble::tribble(
   "Main results", file.path(output_root, "results", "main_results.csv"),
   "Main results by cycle", file.path(output_root, "results", "main_results_by_cycle.csv"),
   "Main estimates by cycle table", file.path(output_root, "results", "main_estimates_by_cycle_table.csv"),
+  "Main estimates by cycle 24-hour composition table", file.path(output_root, "results", "main_estimates_by_cycle_table_24h_composition.csv"),
   "Cycle comparison", file.path(output_root, "results", "cycle_comparison.csv"),
   "Table 1", file.path(output_root, "tables", "table1_wear_day_distribution.csv"),
   "Table 2", file.path(output_root, "tables", "table2_study_comparison.csv"),
@@ -1505,6 +1747,7 @@ output_index <- tibble::tribble(
   "Figure 1", file.path(figure_root, "fig1_workflow.png"),
   "Figure 2", file.path(figure_root, "figure2_hourly_waking_sedentary.png"),
   "Figure 3", file.path(figure_root, "sedentary_distribution_with_24h_composition.png"),
+  "Figure 3 alternative", file.path(figure_root, "sedentary_distribution_with_24h_composition_sleep_label.png"),
   "Figure 4", file.path(figure_root, "cutoff_sensi.png"),
   "Objective diagnostic", file.path(figure_root, "objective_function_cutoff.png"),
   "Sleep distribution diagnostic", file.path(figure_root, "sleep_distribution_comparison.png")

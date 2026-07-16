@@ -1,9 +1,17 @@
 Panel,Row,Cutoff,Mean sedentary hours,SE sedentary hours,Mean waking hours,SE waking hours,Mean sleep/nonwear hours,SE sleep/nonwear hours
-SWaN sleep/wake/nonwear algorithm,Direct states,-,6.5243,0.0402,12.0878,0.0595,11.9112,0.0596
-SWaN sleep/wake/nonwear algorithm,10m epoch,90.01,10.9115,0.0469,16.6562,0.0573,7.3438,0.0573
-SWaN sleep/wake/nonwear algorithm,30m epoch,91.67,11.3879,0.0468,17.1334,0.0558,6.8666,0.0558
-SWaN sleep/wake/nonwear algorithm,1h epoch,90.84,11.3492,0.0444,17.0905,0.0525,6.9095,0.0525
-NHANES 1-minute sleep-state algorithm,Direct states,-,7.9701,0.0414,13.6606,0.0582,9.4763,0.0582
-NHANES 1-minute sleep-state algorithm,10m epoch,90.01,11.0523,0.0471,16.7939,0.0589,7.2061,0.0589
-NHANES 1-minute sleep-state algorithm,30m epoch,86.67,11.1099,0.0459,16.8509,0.0565,7.1491,0.0565
-NHANES 1-minute sleep-state algorithm,1h epoch,85.01,11.2126,0.0457,16.9449,0.055,7.0551,0.055
+SWaN sleep/wake/nonwear algorithm,Direct states (10-sec epoch),-,6.5243,0.0402,12.0878,0.0595,11.9112,0.0596
+SWaN sleep/wake/nonwear algorithm,10-min epoch,90.01,10.9115,0.0469,16.6562,0.0573,7.3438,0.0573
+SWaN sleep/wake/nonwear algorithm,30-min epoch,91.67,11.3879,0.0468,17.1334,0.0558,6.8666,0.0558
+SWaN sleep/wake/nonwear algorithm,1-hour epoch,90.84,11.3492,0.0444,17.0905,0.0525,6.9095,0.0525
+SWaN sleep/wake/nonwear algorithm,1-hour 30-min epoch,89.45,11.2488,0.0435,16.9831,0.0491,7.0169,0.0491
+SWaN sleep/wake/nonwear algorithm,2-hour epoch,88.34,11.3179,0.0407,17.0451,0.0469,6.9549,0.0469
+SWaN sleep/wake/nonwear algorithm,2-hour 30-min epoch,87.23,11.2996,0.0419,17.0196,0.0491,6.9804,0.0491
+SWaN sleep/wake/nonwear algorithm,3-hour epoch,85.01,11.3561,0.0429,17.0629,0.0476,6.9371,0.0476
+NHANES 1-minute sleep-state algorithm,Direct states (1-min epoch),-,7.9701,0.0414,13.6606,0.0582,9.4763,0.0582
+NHANES 1-minute sleep-state algorithm,10-min epoch,90.01,11.0523,0.0471,16.7939,0.0589,7.2061,0.0589
+NHANES 1-minute sleep-state algorithm,30-min epoch,86.67,11.1099,0.0459,16.8509,0.0565,7.1491,0.0565
+NHANES 1-minute sleep-state algorithm,1-hour epoch,85.01,11.2126,0.0457,16.9449,0.055,7.0551,0.055
+NHANES 1-minute sleep-state algorithm,1-hour 30-min epoch,83.34,11.3551,0.0455,17.0783,0.0537,6.9217,0.0537
+NHANES 1-minute sleep-state algorithm,2-hour epoch,80.84,11.372,0.0431,17.0843,0.0515,6.9157,0.0515
+NHANES 1-minute sleep-state algorithm,2-hour 30-min epoch,78.89,11.3236,0.0426,17.0257,0.0515,6.9743,0.0515
+NHANES 1-minute sleep-state algorithm,3-hour epoch,76.12,11.3829,0.0437,17.0696,0.0527,6.9304,0.0527
