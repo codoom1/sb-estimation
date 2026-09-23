@@ -1,0 +1,1886 @@
+---
+title: "Final CRIB Sedentary-Time Analysis: Adults"
+author: "Christopher Odoom"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 2
+    fig_caption: true
+  html_document:
+    toc: true
+    toc_depth: 2
+---
+
+```{r setup, include=FALSE}
+find_project_root <- function(start = getwd()) {
+  current <- normalizePath(start, winslash = "/", mustWork = TRUE)
+  repeat {
+    if (dir.exists(file.path(current, "reports")) &&
+        dir.exists(file.path(current, "R"))) return(current)
+    parent <- dirname(current)
+    if (identical(parent, current)) stop("Could not find project root.")
+    current <- parent
+  }
+}
+
+project_root <- find_project_root()
+knitr::opts_knit$set(root.dir = project_root)
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  fig.align = "center",
+  out.extra = ""
+)
+options(survey.lonely.psu = "adjust", knitr.kable.NA = "")
+
+output_root <- file.path(project_root, "outputs", "final_analysis_crib_adult")
+figure_root <- file.path(project_root, "figures", "final_analysis_crib_adult")
+invisible(lapply(
+  c(output_root, file.path(output_root, c("tables", "results", "datasets")), figure_root),
+  dir.create, recursive = TRUE, showWarnings = FALSE
+))
+```
+
+## Purpose
+
+This report reproduces the substantive manuscript analyses using the CRIB
+minute-level sleep classification and CHAP sitting predictions. It is limited
+to participants aged 18 years or older with at least one eligible day.
+Supplementary analyses compare four waking-time
+methods, vary CRIB parameters on the same primary sample, and assess a
+minimum-two-day eligibility requirement. Sleep-cutoff calibration is used only
+for the supplementary SWaN method comparison.
+
+The primary sitting classification is `wake_ind == "wake"`. A measurement day
+is retained when it contains exactly 1,440 minutes with complete CHAP
+predictions and CRIB identifies at least one wake minute. No day is excluded
+based on the duration of released NHANES `Non-wear` sequences during CRIB
+processing. After CRIB processing, a midnight-to-midnight day is excluded if any original
+NHANES non-wear run is not bounded on both sides within that day by
+known Wake or Sleep states. Unknown does not qualify on either side, and the
+flanking states may be the same. Wake–Non-wear–Wake and Sleep–Non-wear–Sleep
+therefore qualify.
+Participants must have at least one retained day. Later passing days remain
+eligible even if an earlier day was excluded.
+
+## Input-data construction and analytic selections
+
+The CRIB input starts with the NHANES minute-level sleep cache and CHAP
+1-minute sitting-prediction parquet files. For each participant and NHANES
+cycle, the batch workflow obtains the participant list from
+`wristsed::available_participants()`, reads the matching sleep cache, and reads
+all CHAP `part-*.parquet` files in the participant's `Day=YYYY-MM-DD`
+directories. Sleep and CHAP records are matched using participant ID, NHANES
+wear day, and minute index. The CHAP sitting fraction is the proportion of the
+minute classified as sitting.
+
+The released NHANES prediction (`PAXPREDM`) is recoded as `Wake`, `Sleep`,
+`Non-wear`, or `Unknown`. CRIB is applied to the ordered one-minute sleep-state
+vector using these fixed settings:
+
+```text
+method                              CRIB
+target                              Sleep
+target buffer                       10 minutes
+longest allowable interruption      10 minutes
+required target percentage          80 percent
+maximum interruptions               unlimited
+minimum bout duration               30 minutes
+epoch length                        60 seconds
+```
+
+The expanded CRIB output supplies `wake_ind`. The primary sitting analysis
+uses only minutes where `wake_ind == "wake"`. The `sleep_prediction_new`
+interruption label is therefore handled by the CRIB classification and is not
+used as an additional non-wear filter.
+
+Day eligibility is determined before the participant summaries are created. A
+day must contain exactly 1,440 minute records with complete CHAP predictions
+and at least one `wake_ind == "wake"` minute after CRIB processing. No separate
+non-wear duration screen is applied at the day-processing step.
+
+Daily sedentary minutes are the sum of `chap_sitting_fraction` over CRIB wake
+minutes; dividing by 60 gives sedentary hours. These time estimates do not
+threshold the sitting fractions. The 0.50 threshold is used only for the CHAP
+classification strip in Figure 1B and sedentary-bout identification in Figure 4.
+
+Non-wear eligibility is applied after CRIB, using the original NHANES states.
+A day passes if it has no non-wear or every non-wear run is bounded within the
+same midnight-to-midnight day by known Wake or Sleep states, whether those
+states are the same or different. Unknown on either side does not qualify. Runs that reach
+a day boundary or lack an observed state on either side cause the whole day
+to be excluded. Runs are not joined across days for this eligibility rule.
+There is no additional duration threshold for qualifying within-day transitions.
+
+A participant-cycle must have at least one eligible day, age >=18, and complete
+examination weight, masked variance stratum, and PSU metadata. Eligible days
+are averaged within participant-cycle before survey estimation. Requiring at
+least two eligible days is retained as a sensitivity analysis. These are
+complete 24-hour records passing the specified non-wear rule, not confirmed
+24-hour wear: qualifying transition non-wear can remain.
+
+```{r packages}
+library(arrow)
+library(dplyr)
+library(ggplot2)
+library(haven)
+library(knitr)
+library(patchwork)
+library(purrr)
+library(readr)
+library(scales)
+library(survey)
+library(tidyr)
+library(wristsed)
+
+format_decimal <- function(x, digits = 2) {
+  formatC(as.numeric(x), format = "f", digits = digits)
+}
+
+format_export_numbers <- function(data) {
+  data |> mutate(across(where(is.numeric), ~ round(.x, 4)))
+}
+
+paper_kable <- function(data, caption, digits = 2, align = NULL, latex_size = "\\small") {
+  rendered <- data |>
+    mutate(across(where(is.numeric), ~ round(.x, digits)))
+
+  if (knitr::is_latex_output()) {
+    table_text <- knitr::kable(
+      rendered, format = "latex", booktabs = TRUE, linesep = "",
+      caption = caption, align = align
+    )
+    knitr::asis_output(paste(latex_size, table_text, "\\normalsize", sep = "\n"))
+  } else {
+    html_align <- if (!is.null(align) && any(grepl("p\\{", align))) NULL else align
+    knitr::kable(rendered, caption = caption, align = html_align)
+  }
+}
+
+svy_design <- function(data) {
+  svydesign(
+    id = ~PSU,
+    strata = ~Stratum,
+    weights = ~Exam_weight_recal,
+    nest = TRUE,
+    data = data
+  )
+}
+
+save_figure <- function(plot, filename, width, height, dpi = 300) {
+    png_path <- file.path(figure_root, paste0(filename, ".png"))
+    pdf_path <- file.path(figure_root, paste0(filename, ".pdf"))
+    ggsave(png_path, plot,
+         width = width, height = height, units = "in", dpi = dpi, bg = "white")
+    ggsave(pdf_path, plot,
+         width = width, height = height, units = "in", bg = "white")
+    invisible(c(png_path, pdf_path))
+}
+```
+
+```{r load-data}
+crib_results_dir <- file.path(
+  project_root, "outputs", "final_analysis_crib_adult", "results"
+)
+
+daily_sitting <- read_csv(
+  file.path(crib_results_dir, "daily_sitting.csv"),
+  show_col_types = FALSE
+) |>
+  mutate(
+    participant_id = as.character(participant_id),
+    dataset = as.character(dataset)
+  )
+hourly_sitting_daily <- read_csv(
+  file.path(crib_results_dir, "hourly_sitting_daily.csv"),
+  show_col_types = FALSE
+) |>
+  mutate(
+    participant_id = as.character(participant_id),
+    dataset = as.character(dataset)
+  )
+
+if (!"day_type" %in% names(hourly_sitting_daily)) {
+  stop("hourly_sitting_daily.csv must contain day_type.")
+}
+
+# Historical sensitivity scripts can explicitly load the unrestricted inputs.
+apply_primary_day_rule <- getOption("crib.apply_primary_day_rule", TRUE)
+primary_qc_root <- file.path(output_root, "qc", "primary_day_rule")
+dir.create(primary_qc_root, recursive = TRUE, showWarnings = FALSE)
+if (apply_primary_day_rule) {
+  source(file.path(project_root, "R", "crib_primary_day_rule.R"))
+  primary_selection <- apply_crib_primary_day_rule(daily_sitting, hourly_sitting_daily, file.path(output_root, "qc"))
+  daily_sitting <- primary_selection$daily
+  hourly_sitting_daily <- primary_selection$hourly
+  write_csv(primary_selection$audit, file.path(primary_qc_root, "day_eligibility.csv"))
+  write_csv(primary_selection$retained_runs, file.path(primary_qc_root, "retained_transition_runs.csv"))
+}
+minimum_days <- if (apply_primary_day_rule) 1L else 2L
+
+crib_participants <- daily_sitting |>
+  group_by(participant_id, dataset) |>
+  summarise(
+    no_of_valid_days = n_distinct(nhanes_wear_day),
+    est_sedentary_hours = mean(sitting_hours, na.rm = TRUE),
+    est_waking_hours = mean(wake_hours, na.rm = TRUE),
+    est_sleep_hours = 24 - est_waking_hours,
+    est_sitting_percent_wake = mean(sitting_percent_wake, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  mutate(
+    # This is waking time not classified as sedentary by CHAP.
+    est_nonsedentary_hours = est_waking_hours - est_sedentary_hours
+  ) |>
+  filter(no_of_valid_days >= minimum_days) |>
+  rename(ID = participant_id, Dataset = dataset) |>
+  mutate(
+    ID = as.character(ID),
+    Dataset = as.character(Dataset)
+  )
+
+participant_source <- wristsed::get_participant_data(
+  sleep_method = "swan", epoch = "1h", collect = TRUE
+)
+
+participant_metadata <- participant_source |>
+  select(
+    ID, Dataset, Age_group, BMI_cat, Race, Gender, Education,
+    Marital_status, Exam_weight_recal, PSU, Stratum
+  ) |>
+  mutate(ID = as.character(ID), Dataset = as.character(Dataset)) |>
+  distinct(ID, Dataset, .keep_all = TRUE)
+
+nhanes_age <- bind_rows(
+  read_xpt(
+    file.path(project_root, "data", "nhanes-demo-2011-2012.xpt"),
+    col_select = c(SEQN, RIDAGEYR)
+  ) |>
+    transmute(ID = as.character(SEQN), Dataset = "2011-2012", age_years = as.integer(RIDAGEYR)),
+  read_xpt(
+    file.path(project_root, "data", "nhanes-demo-2013-2014.xpt"),
+    col_select = c(SEQN, RIDAGEYR)
+  ) |>
+    transmute(ID = as.character(SEQN), Dataset = "2013-2014", age_years = as.integer(RIDAGEYR))
+)
+
+nhanes_bmi <- bind_rows(
+  read_xpt(
+    file.path(project_root, "data", "nhanes-bmx-2011-2012.xpt"),
+    col_select = c(SEQN, BMXBMI)
+  ) |>
+    transmute(ID = as.character(SEQN), Dataset = "2011-2012", measured_bmi = as.numeric(BMXBMI)),
+  read_xpt(
+    file.path(project_root, "data", "nhanes-bmx-2013-2014.xpt"),
+    col_select = c(SEQN, BMXBMI)
+  ) |>
+    transmute(ID = as.character(SEQN), Dataset = "2013-2014", measured_bmi = as.numeric(BMXBMI))
+)
+
+analytic_df <- crib_participants |>
+  left_join(participant_metadata, by = c("ID", "Dataset")) |>
+  left_join(nhanes_age, by = c("ID", "Dataset")) |>
+  left_join(nhanes_bmi, by = c("ID", "Dataset")) |>
+  filter(
+    age_years >= 18,
+    !is.na(Exam_weight_recal),
+    !is.na(PSU),
+    !is.na(Stratum)
+  ) |>
+  mutate(
+    BMI_cat_crib = case_when(
+      is.na(measured_bmi) ~ NA_character_,
+      measured_bmi < 18.5 ~ "underweight",
+      measured_bmi < 25 ~ "normal weight",
+      measured_bmi < 30 ~ "overweight",
+      TRUE ~ "obesity"
+    )
+  )
+
+if (nrow(analytic_df) == 0L) {
+  stop("No adult CRIB participants with complete survey metadata.")
+}
+
+# Define the design on the complete eligible wrist-accelerometer frame, then
+# restrict estimates to the adult CRIB analytic domain. This retains the full
+# available PSU/stratum structure for domain-based variance estimation.
+survey_design_frame <- participant_metadata |>
+  left_join(nhanes_age, by = c("ID", "Dataset")) |>
+  filter(
+    !is.na(Exam_weight_recal),
+    !is.na(PSU),
+    !is.na(Stratum)
+  ) |>
+  left_join(
+    analytic_df |>
+      select(
+        ID, Dataset, no_of_valid_days, est_sedentary_hours,
+        est_waking_hours, est_sleep_hours, est_sitting_percent_wake,
+        est_nonsedentary_hours, BMI_cat_crib
+      ),
+    by = c("ID", "Dataset")
+  ) |>
+  mutate(
+    in_adult_crib_domain =
+      !is.na(age_years) &
+      age_years >= 18 &
+      !is.na(no_of_valid_days)
+  )
+
+## Define the survey design on the full accelerometer frame, then restrict to the
+## adult CRIB analytic domain.
+full_accelerometer_design <- svy_design(survey_design_frame)
+analytic_design <- subset(full_accelerometer_design, in_adult_crib_domain)
+if (apply_primary_day_rule) {
+  primary_days <- daily_sitting |> semi_join(analytic_df, by = c("participant_id"="ID", "dataset"="Dataset"))
+  write_csv(primary_days, file.path(output_root, "datasets", "primary_daily_sitting.csv"))
+  write_csv(analytic_df, file.path(output_root, "datasets", "primary_analytic_participants.csv"))
+  stopifnot(!anyDuplicated(primary_days[c("participant_id", "dataset", "nhanes_wear_day")]),
+            nrow(primary_days) == sum(analytic_df$no_of_valid_days),
+            all(primary_days$wake_minutes > 0))
+  write_csv(tibble(policy = "known_wake_sleep_bounded_nonwear_v3",
+                   participants = nrow(analytic_df), days = nrow(primary_days),
+                   single_day_participants = sum(analytic_df$no_of_valid_days == 1),
+                   bmi_missing = sum(is.na(analytic_df$BMI_cat_crib)),
+                   primary_days_md5 = unname(tools::md5sum(file.path(output_root, "datasets", "primary_daily_sitting.csv")))),
+            file.path(primary_qc_root, "cohort_summary.csv"))
+  sensitivity_design <- subset(full_accelerometer_design,in_adult_crib_domain & no_of_valid_days>=2)
+  sensitivity <- svymean(~est_sedentary_hours+est_sleep_hours+est_waking_hours,sensitivity_design)
+  ci <- confint(sensitivity)
+  write_csv(tibble(measure=names(coef(sensitivity)),n=nrow(sensitivity_design$variables),mean_hours=as.numeric(coef(sensitivity)),lower_95=ci[,1],upper_95=ci[,2]),
+            file.path(primary_qc_root,"minimum_two_day_sensitivity.csv"))
+}
+
+```
+
+## Sample inclusion flow
+
+Supplementary Figure S1 shows the complete sample pathway from all NHANES
+participants with accelerometer data. It distinguishes input
+processing, adult survey-design eligibility, the complete-day/CHAP-match screen,
+the requirement for some CRIB waking time, and the within-day non-wear screen.
+The final sample includes participants with one eligible day.
+
+Across the two cycles, 14,693 participants had accelerometer data. Of these,
+85 were excluded before CRIB analysis because they had no complete-day data
+(n = 79) or a SWaN sleep-prediction processing failure (n = 6).
+
+```{r sample-inclusion-flow, fig.width=10, fig.height=8, out.width="100%"}
+flow_file <- file.path(primary_qc_root, "upstream_eligibility", "eligibility_flow.csv")
+if (!file.exists(flow_file)) {
+  stop("Missing the verified eligibility-flow input required by the final report.")
+}
+eligibility_flow <- read_csv(flow_file, show_col_types = FALSE)
+flow_n <- setNames(eligibility_flow$n, eligibility_flow$step)
+
+flow_accelerometer <- flow_n[["Participants with accelerometer data across the two NHANES cycles"]]
+flow_precrib_excluded <- flow_n[["Excluded: no complete-day data or SWaN sleep-prediction processing failure"]]
+flow_source <- flow_n[["NHANES participant-cycles available to the CRIB pipeline"]]
+flow_adult_design <- flow_n[["Adults with complete survey design data"]]
+flow_technical_days <- flow_n[["At least 1 complete day"]]
+flow_crib_wake_excluded <- flow_n[["Excluded: no days with any CRIB-classified wake time"]]
+flow_crib_analytic_unrestricted <- flow_n[["Final CRIB analytic sample"]]
+flow_final <- n_distinct(analytic_df$ID, analytic_df$Dataset)
+flow_nonwear_restricted_excluded <- flow_crib_analytic_unrestricted - flow_final
+
+flow_eligible <- flow_technical_days
+flow_boxes <- tibble(
+  x = 0, y = c(8, 6, 4, 2),
+  label = c(
+    paste0("Accelerometer data\nNHANES 2011–2012 and 2013–2014\n(n = ", comma(flow_accelerometer), ")"),
+    paste0("Records available for wake-time processing\n(n = ", comma(flow_source), ")"),
+    paste0("Adults with complete survey data and at least 1 complete day\n(n = ", comma(flow_eligible), ")"),
+    paste0("Final main-analysis sample\nAt least 1 day passing the within-day non-wear rule\n(n = ", comma(flow_final), ")")
+  )
+)
+flow_stages <- tibble(
+  x = -4.6, y = c(8, 6, 4, 2),
+  label = c("Input", "Processing", "Eligibility", "Included")
+)
+flow_exclusions <- tibble(
+  x = 5.6, y = c(7, 5, 3, 1),
+  label = c(
+    paste0("Excluded (n = ", comma(flow_precrib_excluded), ")\nNo complete-day data: 79\nSleep-processing failure: 6"),
+    paste0("Excluded (n = ", comma(flow_source - flow_eligible), ")\nAge <18 years, incomplete survey data,\nor no complete days"),
+    paste0("Excluded (n = ", comma(flow_crib_wake_excluded), ")\nNo wake-eligible days"),
+    paste0("Excluded (n = ", comma(flow_nonwear_restricted_excluded), ")\nNo days remain after the\nwithin-day non-wear screen")
+  )
+)
+
+flow_plot <- ggplot() +
+  geom_segment(
+    data = tibble(y = c(7.35, 5.35, 3.35)),
+    aes(x = 0, xend = 0, y = y, yend = y - 0.62),
+    linewidth = 0.8, colour = "#333333",
+    arrow = grid::arrow(length = grid::unit(0.14, "inches"))
+  ) +
+  geom_segment(
+    data = tibble(y = c(7, 5, 3, 1)),
+    aes(x = 2.25, xend = 3.95, y = y, yend = y),
+    linewidth = 0.75, colour = "#333333",
+    arrow = grid::arrow(length = grid::unit(0.14, "inches"))
+  ) +
+  geom_label(
+    data = flow_boxes,
+    aes(x = x, y = y, label = label),
+    size = 4.25, fontface = "plain", label.size = 0.6,
+    fill = "white", colour = "#333333",
+    label.padding = grid::unit(0.38, "lines"), show.legend = FALSE
+  ) +
+  geom_label(
+    data = flow_stages,
+    aes(x = x, y = y, label = label),
+    size = 3.8, fontface = "bold", angle = 90, label.size = 0.6,
+    fill = "#B9DFF1", colour = "#4D5960",
+    label.padding = grid::unit(0.55, "lines"), show.legend = FALSE
+  ) +
+  geom_label(
+    data = flow_exclusions,
+    aes(x = x, y = y, label = label),
+    size = 3.85, fontface = "plain", label.size = 0.6,
+    fill = "white", colour = "#333333",
+    label.padding = grid::unit(0.42, "lines"), show.legend = FALSE
+  ) +
+  annotate(
+    "text", x = -5.0, y = 0.45,
+    label = "Complete day: exactly 1,440 minute records with complete CHAP predictions; no non-wear duration exclusion.\nWake-eligible day: complete day with at least 1 wake minute after CRIB processing.",
+    hjust = 0, vjust = 1, size = 3.15, colour = "#4D4D4D"
+  ) +
+  coord_cartesian(xlim = c(-5.5, 9.2), ylim = c(0, 9.1), clip = "off") +
+  theme_void(base_size = 14) +
+  theme(plot.margin = margin(16, 30, 12, 30))
+
+save_figure(flow_plot, "figure_s1_crib_sample_inclusion_flow", 10, 8, dpi = 600)
+flow_plot
+```
+
+The final sample includes **`r comma(nrow(analytic_df))` adults
+(`r format_decimal(100 * nrow(analytic_df) / flow_technical_days, 1)`% of adults
+with at least one complete day)** and `r comma(nrow(primary_days))` eligible days.
+One adult had no complete days containing CRIB wake minutes; another
+`r comma(flow_nonwear_restricted_excluded)` adults had no days remaining after
+the bounded non-wear screen. This screen allows matching as well as differing
+states on either side of a non-wear run.
+
+Participant-cycles with no eligible day are excluded. Fully asleep hours within
+retained days remain in the hourly analysis and contribute zero waking and
+waking sedentary time. The upstream audit identifies seven complete days with
+zero CRIB wake time; five were entirely labelled Sleep in the original NHANES
+states. These days are excluded before the non-wear screen.
+
+```{r primary-nonwear-quality-summary}
+primary_day_counts <- primary_selection$audit |>
+  summarise(original_wake_eligible_days=n(), nonwear_excluded_days=sum(exclude_nonwear),
+            primary_eligible_days=sum(keep_day))
+paper_kable(primary_day_counts, "Post-CRIB within-day non-wear eligibility.", digits=0)
+retained_nonwear <- primary_selection$retained_runs |>
+  semi_join(primary_days, by=c("participant_id", "dataset", "nhanes_wear_day"))
+stopifnot(all(retained_nonwear$prev_state == "Wake"),
+          all(retained_nonwear$next_state == "Wake"))
+transition_summary <- retained_nonwear |>
+  summarise(runs=n(), participants=n_distinct(participant_id,dataset),
+            days=n_distinct(participant_id,dataset,nhanes_wear_day),
+            total_minutes=sum(run_minutes), minimum_minutes=min(run_minutes),
+            p25_minutes=quantile(run_minutes,.25), median_minutes=median(run_minutes),
+            p75_minutes=quantile(run_minutes,.75), p90_minutes=quantile(run_minutes,.90),
+            p95_minutes=quantile(run_minutes,.95), maximum_minutes=max(run_minutes))
+paper_kable(transition_summary, "Retained non-wear run durations (minutes; unweighted).", digits=1)
+write_csv(transition_summary,file.path(primary_qc_root,"retained_transition_summary.csv"))
+nonwear_bins <- retained_nonwear |>
+  mutate(duration=cut(run_minutes, breaks=c(0,5,10,20,30,60,120,240,480,Inf),
+    labels=c("1–5","6–10","11–20","21–30","31–60","61–120","121–240","241–480",">480"))) |>
+  count(duration,.drop=FALSE,name="runs") |> mutate(percent=100*runs/sum(runs))
+paper_kable(nonwear_bins, "Distribution of retained non-wear run durations (minutes).", digits=1)
+write_csv(nonwear_bins,file.path(primary_qc_root,"retained_nonwear_duration_distribution.csv"))
+nonwear_duration_plot <- ggplot(retained_nonwear,aes(x=run_minutes)) +
+  geom_histogram(binwidth=30,boundary=0,fill="#326B8E",color="white") +
+  labs(x="Retained non-wear run duration (minutes)",y="Number of runs",
+       caption="Unweighted runs on retained primary-analysis days; 30-minute bins.") +
+  theme_minimal(base_size=12)
+save_figure(nonwear_duration_plot,"figure_s2_retained_nonwear_duration",8,4.5)
+print(nonwear_duration_plot)
+```
+
+The retained sample contains `r comma(transition_summary$runs)` non-wear runs
+on `r comma(transition_summary$days)` days in
+`r comma(transition_summary$participants)` adults. All have Wake on both sides;
+no retained runs have Sleep on either side. The median run duration is
+`r sprintf("%.1f",transition_summary$median_minutes)` minutes
+(IQR `r sprintf("%.1f",transition_summary$p25_minutes)`–`r sprintf("%.1f",transition_summary$p75_minutes)`),
+with a range of `r transition_summary$minimum_minutes`–`r transition_summary$maximum_minutes` minutes.
+`r sum(retained_nonwear$run_minutes <= 30)` runs are 30 minutes or shorter;
+`r sprintf("%.1f",100*mean(retained_nonwear$run_minutes <= 60))`% are 60 minutes or shorter.
+A run is a maximal uninterrupted sequence of original NHANES Non-wear minutes;
+its length excludes the Wake/Sleep minutes on either side. For example,
+Sleep–Non-wear–Non-wear–Sleep contributes one 2-minute run. Separate runs within
+a day contribute separate observations, rather than their combined daily total.
+For example, a retained day containing separate 41-minute and 251-minute runs
+contributes those two durations, not a single 292-minute duration.
+These summaries describe observed runs and are not survey-weighted population estimates.
+
+Non-wear labels bounded by known Wake or Sleep states could reflect classification
+error, but they could also represent actual device removal. Their duration
+distribution does not support characterizing the retained runs as predominantly
+brief classification artifacts. The boundary rule is an operational eligibility
+choice; it does not establish that the retained intervals represent true wear.
+No duration cutoff was used to select these runs.
+
+### Independent check against original NHANES files
+
+This audit reads the original CDC `PAXMIN_G.xpt` and `PAXMIN_H.xpt` files directly,
+before CRIB processing, CHAP matching, or day exclusions. All four state-frequency
+totals in each file agree exactly with the CDC codebooks. The run distribution
+uses consecutive `PAXPREDM == 3` minute records, preserving runs across midnight
+when the recording is continuous. Record-edge runs describe observed lengths and
+may be truncated. These are unweighted run-level summaries.
+
+```{r original-nhanes-nonwear-audit}
+original_nw_root <- file.path(primary_qc_root,"..","original_nhanes_nonwear")
+original_nw_summary <- read_csv(file.path(original_nw_root,"duration_summary_by_scope.csv"),show_col_types=FALSE)
+original_nw_table <- original_nw_summary |>
+  filter(scope %in% c("All NHANES participants; continuous runs", "All adults; continuous runs", "Final report retained runs")) |>
+  transmute(Sample=scope,Runs=runs,`Minimum (min)`=minimum,`Median (min)`=median,
+            `25th percentile (min)`=p25,`75th percentile (min)`=p75,
+            `1-minute runs`=runs_1_minute,`2-minute runs`=runs_2_minutes,
+            `Runs ≤30 minutes (%)`=pct_at_most_30)
+paper_kable(original_nw_table,"Non-wear run durations from original NHANES files versus retained report runs.",digits=1)
+known_original_runs <- original_nw_summary |> filter(scope=="All adults; Wake/Sleep-bounded continuous runs")
+knitr::include_graphics(normalizePath(file.path(original_nw_root,"original_nhanes_nonwear_distribution.png")),rel_path=FALSE)
+```
+
+Before day screening, `r comma(known_original_runs$runs)` adult runs have known
+Wake/Sleep states immediately on both sides; their minimum duration is already
+`r known_original_runs$minimum` minutes. Thus this minimum is present before day
+eligibility selection. The shorter adult runs have Unknown or a recording edge/gap
+on at least one side.
+
+Short non-wear runs occur in the original NHANES files. Their presence in the
+unfiltered files must be distinguished from their eligibility under the report's
+known-boundary day screen. The original-file audit independently reproduces the
+individual lengths and immediate flanking states of every retained non-wear run.
+Eligibility is attached after the original runs are identified; each retained run
+must have exactly the same duration before and after screening.
+See the [2011–2012 CDC codebook](https://wwwn.cdc.gov/Nchs/Data/Nhanes/Public/2011/DataFiles/PAXMIN_G.htm)
+and [2013–2014 CDC codebook](https://wwwn.cdc.gov/Nchs/Data/Nhanes/Public/2013/DataFiles/PAXMIN_H.htm).
+
+```{r minimum-two-day-sensitivity}
+minimum_two_day_table <- read_csv(
+  file.path(primary_qc_root, "minimum_two_day_sensitivity.csv"), show_col_types = FALSE
+) |>
+  transmute(
+    Measure = recode(measure, est_sedentary_hours = "Waking sedentary time",
+                     est_sleep_hours = "CRIB-excluded time", est_waking_hours = "Waking time"),
+    N = n, `Mean (95% CI), h/day` = sprintf("%.2f (%.2f, %.2f)", mean_hours, lower_95, upper_95)
+  )
+paper_kable(minimum_two_day_table,
+            "Sensitivity analysis requiring at least two days passing the same non-wear rule.")
+```
+
+## Pooled and cycle-specific time estimates
+
+```{r main-estimates}
+time_measures <- bind_rows(
+  tibble(
+    Measure = "Waking time",
+    variable = "est_waking_hours"
+  ),
+  tibble(
+    # This quantity includes both CRIB Sleep and interruption minutes.
+    Measure = "CRIB-excluded time",
+    variable = "est_sleep_hours"
+  ),
+  tibble(
+    Measure = "Waking sedentary time",
+    variable = "est_sedentary_hours"
+  ),
+  tibble(
+    Measure = "Waking non-sedentary time",
+    variable = "est_nonsedentary_hours"
+  )
+)
+
+estimate_time_measures <- function(design) {
+  time_measures |>
+  rowwise() |>
+  mutate(
+    estimate = list(svymean(as.formula(paste0("~", variable)), design, na.rm = TRUE))
+  ) |>
+  ungroup() |>
+  mutate(
+    Mean = map_dbl(estimate, ~ unname(coef(.x)[1])),
+    SE = map_dbl(estimate, ~ unname(SE(.x)[1])),
+    Lower = Mean - 1.96 * SE,
+    Upper = Mean + 1.96 * SE
+  ) |>
+  select(Measure, Mean, SE, Lower, Upper)
+}
+
+main_estimates <- estimate_time_measures(analytic_design)
+
+write_csv(format_export_numbers(main_estimates), file.path(output_root, "results", "main_estimates.csv"))
+cycle_estimates <- analytic_df |>
+  group_by(Dataset) |>
+  group_modify(~ {
+    estimate_time_measures(svy_design(.x)) |>
+      mutate(
+      n_participants = n_distinct(.x$ID)
+      )
+  }) |>
+  ungroup()
+
+write_csv(format_export_numbers(cycle_estimates), file.path(output_root, "results", "cycle_estimates.csv"))
+
+time_estimates_table <- bind_rows(
+  main_estimates |>
+    mutate(`Estimate group` = "Pooled (2011-2014)"),
+  cycle_estimates |>
+    transmute(
+      Measure, Mean, SE, Lower, Upper,
+      `Estimate group` = Dataset
+    )
+) |>
+  mutate(
+    `Estimate group` = factor(
+      `Estimate group`,
+      levels = c("Pooled (2011-2014)", "2011-2012", "2013-2014")
+    ),
+    `Mean (SE; 95% CI), h/day` = sprintf(
+      "%.2f (%.2f; %.2f, %.2f)", Mean, SE, Lower, Upper
+    )
+  ) |>
+  select(Measure, `Estimate group`, `Mean (SE; 95% CI), h/day`) |>
+  pivot_wider(names_from = `Estimate group`, values_from = `Mean (SE; 95% CI), h/day`)
+
+write_csv(
+  time_estimates_table,
+  file.path(output_root, "tables", "table_pooled_cycle_time_estimates.csv")
+)
+paper_kable(
+  time_estimates_table,
+  "Survey-weighted adult estimates of waking, CRIB-excluded, waking sedentary, and waking non-sedentary time, pooled and by NHANES cycle. Values are mean (SE; 95% CI) hours/day."
+)
+```
+
+### Difference between NHANES cycles
+
+```{r cycle-comparison}
+cycle_design <- update(
+  analytic_design,
+  Dataset = factor(Dataset, levels = c("2011-2012", "2013-2014"))
+)
+cycle_model <- svyglm(est_sedentary_hours ~ Dataset, design = cycle_design)
+cycle_term <- "Dataset2013-2014"
+
+cycle_comparison <- tibble(
+  contrast = "2013-2014 minus 2011-2012",
+  difference_hours = unname(coef(cycle_model)[[cycle_term]]),
+  SE = unname(SE(cycle_model)[[cycle_term]]),
+  p_value = unname(summary(cycle_model)$coefficients[cycle_term, "Pr(>|t|)"])
+)
+
+write_csv(
+  format_export_numbers(cycle_comparison),
+  file.path(output_root, "results", "cycle_comparison.csv")
+)
+paper_kable(
+  cycle_comparison,
+  "Survey-weighted difference in adult CRIB sedentary time between NHANES cycles."
+)
+```
+
+## Comparison of waking-time methods
+
+All four methods use the adopted primary eligibility: complete days with some
+CRIB waking time that pass the original NHANES within-day non-wear screen,
+with at least one eligible common day per participant. The shared day set is
+then restricted to days with complete inputs for all methods. The SWaN cutoff
+is calibrated within this common sample.
+
+The following comparison places NHANES + CRIB on those common days alongside
+three alternative approaches: direct one-hour SWaN states, a one-hour SWaN
+cutoff calibrated to self-reported sleep in the common analytic domain, and
+direct one-hour NHANES sleep states. To isolate differences attributable to the
+sleep/wake approach, every method is estimated on the same adult
+participant-cycles and their mutually available eligible days.
+
+For every approach, excluded time is the complement of waking time, so the two
+sum to 24 hours/day. Its operational definition differs by method: for direct
+SWaN states, it includes SWaN sleep/non-wear and any residual unclassified
+time; for the calibrated SWaN cutoff, it is time in hours at or above the sleep/non-wear percentage cutoff;
+for direct NHANES states, it includes released sleep, non-wear, and Unknown
+time; and for NHANES + CRIB, it is the final binary CRIB `sleep` label (the
+relabelled Sleep plus interruption class). Waking sedentary and non-sedentary
+time partition waking time.
+
+```{r four-method-comparison}
+method_comparison_file <- file.path(
+  project_root, "outputs", "waking_time_method_comparison", "method_estimates.csv"
+)
+if (!file.exists(method_comparison_file)) {
+  stop("Missing four-method comparison output. Run R/run_waking_time_method_comparison.R first.")
+}
+method_comparison <- read_csv(method_comparison_file, show_col_types = FALSE) |>
+  filter(Analysis == "Pooled") |>
+  mutate(
+    Method = case_when(
+      Method == "Direct SWaN states (1-hour)" ~ "Direct SWaN states",
+      grepl("^SWaN \\+ common-sample calibrated cutoff", Method) ~ "SWaN + calibrated cutoff",
+      Method == "Direct NHANES states (1-hour)" ~ "Direct NHANES states",
+      TRUE ~ Method
+    ),
+    Method = factor(
+      Method,
+      levels = c(
+        "Direct SWaN states", "SWaN + calibrated cutoff",
+        "Direct NHANES states", "NHANES + CRIB"
+      )
+    ),
+    `Mean (95% CI), h/day` = sprintf("%.2f (%.2f, %.2f)", Mean, Lower, Upper)
+  ) |>
+  select(Measure, Method, `Mean (95% CI), h/day`) |>
+  pivot_wider(names_from = Method, values_from = `Mean (95% CI), h/day`) |>
+  select(
+    Measure, `Direct SWaN states`, `SWaN + calibrated cutoff`,
+    `Direct NHANES states`, `NHANES + CRIB`
+  )
+
+method_common_n <- read_csv(
+  file.path(project_root, "outputs", "waking_time_method_comparison", "sample_sizes.csv"),
+  show_col_types = FALSE
+) |>
+  pull(N) |>
+  unique()
+if (length(method_common_n) != 1L) {
+  stop("The four-method comparison must have one common participant-cycle sample size.")
+}
+
+method_eligibility <- read_csv(
+  file.path(project_root,"outputs","waking_time_method_comparison","primary_comparison_eligibility.csv"),
+  show_col_types=FALSE
+)
+stopifnot(method_eligibility$minimum_days==1,
+          method_eligibility$primary_participants==nrow(analytic_df),
+          method_eligibility$primary_days==nrow(primary_days),
+          method_eligibility$common_participants==method_common_n)
+
+method_calibration <- read_csv(
+  file.path(project_root, "outputs", "waking_time_method_comparison", "common_sample_calibration.csv"),
+  show_col_types = FALSE
+)
+
+write_csv(
+  method_comparison,
+  file.path(output_root, "tables", "table_four_method_waking_time_comparison.csv")
+)
+paper_kable(
+  method_comparison,
+  paste0("Survey-weighted waking-time estimates across four sleep/wake approaches, evaluated in the common adult participant-cycle sample (N = ", comma(method_common_n), "). The SWaN cutoff was calibrated within this domain among participants with valid self-reported sleep duration (n = ", comma(method_calibration$calibration_self_report_n[[1]]), "). Excluded time is method-specific but, for every method, is the complement of waking time; the two sum to 24 hours/day. Values are mean (95% CI) hours/day."),
+  digits = 2
+)
+```
+
+The comparison includes `r comma(method_eligibility$common_participants)`
+participants and `r comma(method_eligibility$common_days)` common primary-eligible
+days, out of `r comma(method_eligibility$primary_participants)` primary participants
+and `r comma(method_eligibility$primary_days)` primary days. It includes
+`r comma(method_eligibility$common_single_day_participants)` participants with
+one common day.
+
+`r if (method_eligibility$common_participants == method_eligibility$primary_participants && method_eligibility$common_days == method_eligibility$primary_days) "All primary participants and days have complete inputs for the four methods, so the CRIB comparison estimate uses the full primary sample." else "The comparison uses the subset of primary days with complete inputs for all four methods; differences from the full primary CRIB estimate reflect this additional availability restriction."`
+
+Within the common analytic domain, the survey-weighted self-reported sleep
+benchmark was `r format_decimal(method_calibration$self_reported_sleep_mean[[1]], 2)`
+hours/day (95% CI: `r format_decimal(method_calibration$self_reported_sleep_ci_lower[[1]], 2)`--`r format_decimal(method_calibration$self_reported_sleep_ci_upper[[1]], 2)`).
+The selected one-hour SWaN cutoff was
+`r format_decimal(method_calibration$selected_cutoff[[1]], 2)`%, which yielded
+`r format_decimal(method_calibration$swan_sleep_mean_at_selected_cutoff[[1]], 2)`
+hours/day in the calibration sample.
+
+## Supplementary CRIB parameter sensitivity
+
+We varied required sleep (70%, 80%, and 90%) and minimum bout duration
+(20, 30, 45, and 60 minutes), holding the other CRIB parameters fixed.
+All 12 specifications use the same `r comma(nrow(analytic_df))` adults and
+`r comma(nrow(primary_days))` days selected by
+the primary within-day non-wear rule. CRIB is applied to each participant's
+full sequence of complete CHAP-matched days before selecting the primary
+analytic days. Eligibility is not re-evaluated under alternative settings;
+a primary-eligible day classified entirely as sleep under an alternative
+setting contributes zero waking sedentary time.
+
+For each participant, daily waking sedentary hours are averaged over those
+same days. Each table cell reports the survey-weighted mean paired difference
+from the primary 80%/30-minute setting and its two-sided p-value, overall or
+within the indicated subgroup. Positive differences indicate more estimated
+waking sedentary time. The tests assess whether the mean paired difference
+is zero; they do not test whether effects differ between subgroups. P-values
+are unadjusted for multiple comparisons.
+
+```{r crib-parameter-sensitivity, results="asis"}
+sensitivity_dir <- file.path(output_root, "parameter_sensitivity")
+sensitivity_file <- file.path(sensitivity_dir, "paired_sedentary_differences.csv")
+eligibility_file <- file.path(sensitivity_dir, "eligibility_summary.csv")
+if (!all(file.exists(c(sensitivity_file, eligibility_file)))) {
+  stop("Run R/run_crib_primary_sensitivity.R for all batches and then R/summarise_crib_primary_sensitivity.R.")
+}
+sensitivity_results <- read_csv(sensitivity_file, show_col_types = FALSE)
+sensitivity_eligibility <- read_csv(eligibility_file, show_col_types = FALSE)
+stopifnot(all(sensitivity_results$policy == "known_wake_sleep_bounded_nonwear_v3"),
+          all(sensitivity_results$primary_days_md5 == unname(tools::md5sum(file.path(output_root, "datasets", "primary_daily_sitting.csv")))),
+          nrow(sensitivity_eligibility) == 12L,
+          all(sensitivity_eligibility$n_participants == nrow(analytic_df)),
+          all(sensitivity_eligibility$n_days == nrow(primary_days)))
+sensitivity_reference <- sensitivity_results |>
+  filter(subgroup == "Overall", required_percent == 80, minimum_bout_minutes == 30)
+stopifnot(nrow(sensitivity_reference) == 1L,
+          abs(sensitivity_reference$mean_sedentary_hours -
+              main_estimates$Mean[main_estimates$Measure == "Waking sedentary time"]) < 1e-8)
+source(file.path(project_root, "R", "crib_sensitivity_table.R"))
+if (knitr::is_latex_output()) {
+  cat(crib_sensitivity_latex(sensitivity_results))
+} else {
+  cat(crib_sensitivity_html(sensitivity_results))
+}
+```
+
+## Table 2: study comparison
+
+```{r table-2}
+crib_sedentary_mean <- main_estimates |>
+  filter(Measure == "Waking sedentary time") |>
+  pull(Mean)
+crib_waking_mean <- main_estimates |>
+  filter(Measure == "Waking time") |>
+  pull(Mean)
+
+table2 <- tibble::tribble(
+  ~Paper, ~`Dataset & Population`, ~Method, ~`Estimate & Notes`,
+  "This study",
+  paste0(
+    "NHANES 2011-2014, adult participants aged 18+ years; ",
+    comma(n_distinct(analytic_df$ID)), " participants."
+  ),
+  "CHAP wrist model with CRIB sleep classification.",
+  paste0(
+    "Waking sedentary time: ", format_decimal(crib_sedentary_mean, 1),
+    " hours/day; ",
+    format_decimal(100 * crib_sedentary_mean / crib_waking_mean, 1),
+    "% of waking time. Mean waking time was ",
+    format_decimal(crib_waking_mean, 1), " hours/day."
+  ),
+  "Matthews et al. (2008)",
+  "NHANES 2003-2004; hip-worn ActiGraph data; 6,329 participants, aged 6+ years.",
+  "Intensity threshold of <100 counts/min.",
+  "Sedentary time: 7.7 hours/day; 54.9% of monitored time. Mean monitor wear time was 13.9 hours/day.",
+  "Yang et al. (2019)",
+  "NHANES 2001-2016; 51,896 children and adolescents.",
+  "Self-reported total sitting time from questionnaire.",
+  "Sedentary time: 6.4 hours/day in adults; 8.2 hours/day in adolescents. Sitting time increased in both groups from 2001 onward.",
+  "Ussery et al. (2018)",
+  "NHANES 2015-2016; 5,923 U.S. adults aged 18+ years.",
+  "Self-reported sitting time on a typical day.",
+  "Approximately 6.4 hours/day; 25.7% of adults reported sitting for more than 8 hours per day."
+)
+
+write_csv(table2, file.path(output_root, "tables", "table2_study_comparison.csv"))
+paper_kable(
+  table2,
+  "Comparison of sedentary-time estimates across studies by measurement method, datasets, and population.",
+  align = c("p{0.16\\linewidth}", "p{0.29\\linewidth}", "p{0.20\\linewidth}", "p{0.27\\linewidth}"),
+  latex_size = "\\scriptsize"
+)
+```
+
+## Figure 1: CRIB classification workflow
+
+**Figure 1. Workflow for deriving hourly waking sedentary time from NHANES
+minute-level classifications and CRIB sleep-bout analysis.** (A) Raw 80-Hz
+triaxial wrist acceleration summarized in one-minute intervals. (B) One-minute
+CHAP sedentary predictions, released NHANES wake/sleep/non-wear/unknown
+classifications, and the corresponding NHANES + CRIB sleep-bout
+classification. (C) Hourly sleep and CHAP sedentary time retained
+among CRIB-classified wake minutes; the shaded area follows the sleep curve.
+
+The workflow uses participant 83724 on 2000-01-12 (NHANES wear day 8), a
+complete 1,440-minute protocol day. Panel A uses the original 80-Hz signal;
+Panels B and C use the corresponding CRIB batch records. In particular,
+`chap_sitting_fraction` is the validated one-minute aggregation of the current
+CHAP 10-second source used by the CRIB sedentary-time analysis.
+
+```{r figure-1, fig.width=11, fig.height=9.4, out.width="100%"}
+figure1_id <- "83724"
+figure1_dataset <- "2013-2014"
+figure1_date <- "2000-01-12"
+figure1_wear_day <- 8L
+# Small verified extract from the current CRIB output permits local rendering.
+figure1_data <- read_csv(file.path(primary_qc_root,"figure1_reference_minutes.csv"),show_col_types=FALSE) |>
+  mutate(participant_id=as.character(participant_id),minute=as.numeric(minute_index),hour_of_day=minute/60) |>
+  filter(participant_id==figure1_id,dataset==figure1_dataset,nhanes_wear_day==figure1_wear_day,day==figure1_date) |>
+  arrange(minute)
+
+if (
+  nrow(figure1_data) != 1440L ||
+    min(figure1_data$minute_index) != 0L ||
+    max(figure1_data$minute_index) != 1439L
+) {
+  stop("Reference participant-day 83724 / 2000-01-12 is not a complete CRIB day.")
+}
+
+reference_data_dir <- file.path(project_root, "data", "top_level_data_1h_epoch")
+reference_raw_path <- file.path(
+  reference_data_dir, "raw80HZ_83724_data", "2000-01-12.csv"
+)
+if (!file.exists(reference_raw_path)) {
+  stop("Reference raw file for participant 83724 / 2000-01-12 is required for Figure 1.")
+}
+
+raw_header <- readLines(reference_raw_path, n = 20, warn = FALSE)
+raw_header_line <- which(grepl("^Accelerometer X,", raw_header))[1]
+if (is.na(raw_header_line)) {
+  stop("Could not locate the raw accelerometer header for participant 83724 / 2000-01-12.")
+}
+panel_a_data <- vroom::vroom(
+  reference_raw_path,
+  skip = raw_header_line - 1L,
+  delim = ",",
+  col_select = c("Accelerometer X", "Accelerometer Y", "Accelerometer Z"),
+  show_col_types = FALSE,
+  progress = FALSE,
+  altrep = FALSE
+) |>
+  transmute(
+    hour_of_day = floor((row_number() - 1L) / (80 * 60)) / 60,
+    `X axis` = `Accelerometer X`,
+    `Y axis` = `Accelerometer Y`,
+    `Z axis` = `Accelerometer Z`
+  ) |>
+  group_by(hour_of_day) |>
+  summarise(across(c(`X axis`, `Y axis`, `Z axis`), mean, na.rm = TRUE), .groups = "drop") |>
+  pivot_longer(c(`X axis`, `Y axis`, `Z axis`), names_to = "axis", values_to = "acceleration")
+
+INK <- "#111111"
+GRID <- "#E1E5EA"
+FRAME <- "#1A1A1A"
+BLUE <- "#2F5F98"
+BLUE_LIGHT <- "#D8E4F2"
+GOLD <- "#D8902F"
+GREEN <- "#4C9A3F"
+GREEN_DARK <- "#2F7D32"
+PURPLE <- "#8E63CE"
+TEAL <- "#2296A7"
+RED <- "#8B1E2D"
+
+figure1_theme <- theme_bw(base_size = 17) +
+  theme(
+    plot.title = element_text(face = "bold", size = 20, color = INK, margin = margin(b = 9)),
+    plot.tag = element_text(face = "bold", size = 28, color = INK),
+    plot.tag.position = c(-0.045, 1.02),
+    axis.title = element_text(face = "bold", size = 17, color = INK),
+    axis.text = element_text(color = INK, face = "bold", size = 13),
+    axis.title.x = element_text(margin = margin(t = 8)),
+    axis.title.y = element_text(margin = margin(r = 8)),
+    axis.ticks = element_line(color = FRAME, linewidth = 1.1),
+    axis.ticks.length = unit(0.15, "cm"),
+    panel.grid.major = element_line(color = GRID, linewidth = 0.75),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(color = FRAME, linewidth = 1.25),
+    legend.position = "bottom",
+    legend.title = element_blank(),
+    legend.text = element_text(face = "bold", size = 13, color = INK),
+    legend.key.width = unit(1.65, "lines"),
+    legend.key.height = unit(0.9, "lines"),
+    plot.margin = margin(10, 16, 10, 54)
+  )
+
+panel_a <- ggplot(panel_a_data, aes(hour_of_day, acceleration, color = axis)) +
+  geom_line(linewidth = 1.15, alpha = 0.96, na.rm = TRUE) +
+  scale_color_manual(values = c("X axis" = PURPLE, "Y axis" = TEAL, "Z axis" = GREEN)) +
+  scale_x_continuous(breaks = seq(0, 24, 4), limits = c(0, 24), expand = expansion(mult = c(0, 0))) +
+  scale_y_continuous(limits = c(-1.5, 1.7), breaks = seq(-1, 1, 1), expand = expansion(mult = c(0, 0.02))) +
+  labs(
+    title = "80 Hz triaxial acceleration: 1-minute averages",
+    x = "Hour of day", y = "Acceleration (g)", tag = "A"
+  ) +
+  guides(color = guide_legend(nrow = 1, byrow = TRUE, override.aes = list(linewidth = 2.4))) +
+  figure1_theme +
+  theme(legend.margin = margin(t = 2, b = 0), plot.margin = margin(10, 16, 16, 54))
+
+panel_b_data <- bind_rows(
+  figure1_data |>
+    transmute(
+      hour_of_day,
+      source = "NHANES",
+      state = case_when(
+        sleep_prediction == "Wake" ~ "NHANES Wake",
+        sleep_prediction == "Sleep" ~ "NHANES Sleep",
+        sleep_prediction == "Non-wear" ~ "NHANES Non-wear",
+        TRUE ~ "NHANES Unknown"
+      )
+    ),
+  figure1_data |>
+    transmute(
+      hour_of_day,
+      source = "NHANES + CRIB",
+      state = case_when(
+        wake_ind == "wake" ~ "CRIB Wake",
+        TRUE ~ "CRIB Sleep"
+      ),
+      tile_width = 1 / 60,
+      tile_height = 0.46
+    ),
+  figure1_data |>
+    transmute(
+      hour_of_day,
+      source = "CHAP",
+      state = if_else(chap_sitting_fraction >= 0.5, "CHAP Sedentary", "CHAP Non-sedentary"),
+      tile_width = 1 / 60,
+      tile_height = 0.46
+    )
+) |>
+  mutate(
+    tile_width = coalesce(tile_width, 1 / 60),
+    tile_height = coalesce(tile_height, 0.46)
+  )
+
+classification_colors <- c(
+  "NHANES Sleep" = GOLD,
+  "NHANES Wake" = GREEN_DARK,
+  "NHANES Non-wear" = "#8C8C8C",
+  "NHANES Unknown" = "#B9C0CB",
+  "CRIB Sleep" = PURPLE,
+  "CRIB Wake" = GREEN_DARK,
+  "CHAP Non-sedentary" = BLUE_LIGHT,
+  "CHAP Sedentary" = BLUE,
+  "Legend spacer 1" = "transparent",
+  "Legend spacer 2" = "transparent",
+  "Legend spacer 3" = "transparent",
+  "Legend spacer 4" = "transparent"
+)
+
+panel_b_data <- panel_b_data |>
+  # `drop = FALSE` below uses these factor levels to retain states that are
+  # absent from the selected example day and preserve the source-row legend.
+  mutate(
+    state = factor(state, levels = names(classification_colors)),
+    tile_width = tile_width,
+    tile_height = tile_height
+  ) |>
+  bind_rows(
+    # Zero-size tiles make every state available to the legend without adding
+    # a mark to the plotted classification lanes.
+    tibble(
+      hour_of_day = 0,
+      source = "CHAP",
+      state = factor(names(classification_colors), levels = names(classification_colors)),
+      tile_width = 0,
+      tile_height = 0
+    )
+  )
+
+panel_b <- ggplot(panel_b_data, aes(hour_of_day, source, fill = state)) +
+  geom_tile(aes(width = tile_width, height = tile_height)) +
+  scale_x_continuous(breaks = seq(0, 24, 4), limits = c(0, 24)) +
+  # Discrete limits run bottom-to-top: NHANES + CRIB, NHANES, then CHAP.
+  # All lanes are one-minute classifications, stated once in the panel title.
+  scale_y_discrete(limits = c("NHANES + CRIB", "NHANES", "CHAP")) +
+  scale_fill_manual(
+    values = classification_colors,
+    # Keep the complete source-specific key even when this illustrative day
+    # does not contain one of the possible states (for example, non-wear).
+    drop = FALSE,
+    breaks = c(
+      "CHAP Non-sedentary", "CHAP Sedentary", "Legend spacer 1", "Legend spacer 2",
+      "NHANES Sleep", "NHANES Wake", "NHANES Non-wear", "NHANES Unknown",
+      "CRIB Sleep", "CRIB Wake", "Legend spacer 3", "Legend spacer 4"
+    ),
+    labels = c(
+      "CHAP: Non-sedentary", "CHAP: Sedentary", "", "",
+      "NHANES: Sleep", "NHANES: Wake", "NHANES: Non-wear", "NHANES: Unknown",
+      "NHANES + CRIB: Sleep", "NHANES + CRIB: Wake", "", ""
+    )
+  ) +
+  labs(tag = "B", title = "Full-day 1-minute classifications", x = "Hour of day", y = NULL) +
+  # Four legend columns keep each source on its own visual row: CHAP,
+  # NHANES, then NHANES + CRIB. Transparent keys pad shorter source-specific rows.
+  guides(fill = guide_legend(
+    ncol = 4,
+    byrow = TRUE,
+    override.aes = list(linewidth = 0)
+  )) +
+  figure1_theme +
+  theme(
+    # Compact keys preserve the three source-specific legend rows within the
+    # workflow panel after naming the derived lane "NHANES + CRIB".
+    legend.text = element_text(size = 9),
+    legend.key.width = unit(1.0, "lines"),
+    legend.margin = margin(t = 2, b = 0),
+    plot.margin = margin(10, 16, 22, 54)
+  )
+
+panel_c_data <- figure1_data |>
+  mutate(hour = floor(hour_of_day)) |>
+  group_by(hour) |>
+  summarise(
+    percent_crib_nonwake = 100 * mean(wake_ind != "wake", na.rm = TRUE),
+    percent_waking_sedentary = 100 * sum(
+      if_else(wake_ind == "wake", chap_sitting_fraction, 0), na.rm = TRUE
+    ) / 60,
+    .groups = "drop"
+  )
+
+# Extend the last hourly value to midnight for display; hourly estimates stay
+# at 0:23. The fill follows the sleep curve without a percentage cutoff.
+panel_c_curve <- bind_rows(
+  panel_c_data,
+  panel_c_data |> filter(hour == 23) |> mutate(hour = 24)
+)
+
+panel_c <- ggplot(panel_c_data, aes(hour)) +
+  geom_ribbon(
+    data = panel_c_curve,
+    aes(ymin = 0, ymax = percent_crib_nonwake),
+    fill = scales::alpha("#F5DEDF", 0.85), color = NA
+  ) +
+  geom_line(data = panel_c_curve, aes(y = percent_crib_nonwake), color = "#9933F2", linewidth = 1.85) +
+  geom_point(aes(y = percent_crib_nonwake), color = "#9933F2", size = 3.9, shape = 15) +
+  geom_line(data = panel_c_curve, aes(y = percent_waking_sedentary), color = BLUE, linewidth = 2.35) +
+  geom_point(aes(y = percent_waking_sedentary), color = BLUE, size = 4.2) +
+  annotate("text", x = 19, y = 15, label = "Sleep", color = "#9933F2", size = 4.2, fontface = "bold", hjust = 1) +
+  annotate("text", x = 19, y = 94, label = "Waking sedentary", color = BLUE, size = 5, fontface = "bold", hjust = 1) +
+  annotate("text", x = 0.2, y = 8, label = "Shaded area = sleep", color = RED, size = 3.6, fontface = "bold", hjust = 0) +
+  scale_x_continuous(breaks = seq(0, 24, 4), limits = c(0, 24), expand = expansion(mult = c(0, 0))) +
+  scale_y_continuous(breaks = seq(0, 100, 20), limits = c(0, 108), expand = expansion(mult = c(0, 0))) +
+  labs(
+    title = "Waking and sedentary time estimation",
+    x = "Hour of day", y = "Hour classified (%)", tag = "C"
+  ) +
+  figure1_theme +
+  theme(plot.margin = margin(10, 16, 8, 54))
+
+figure1 <- panel_a / panel_b / panel_c +
+  plot_layout(heights = c(1.05, 1.15, 1.05))
+
+save_figure(figure1, "figure1_crib_classification_workflow", 11, 10.6)
+figure1
+```
+
+## Table 1: valid-day distribution
+
+```{r table-1}
+df_days <- analytic_df |>
+  distinct(ID, Dataset, no_of_valid_days)
+
+table_by_cycle <- df_days |>
+  count(Dataset, no_of_valid_days, name = "n") |>
+  group_by(Dataset) |>
+  mutate(
+    percent = 100 * n / sum(n),
+    value = paste0(format(n, big.mark = "", scientific = FALSE, trim = TRUE),
+                   " (", format_decimal(percent, 1), ")")
+  ) |>
+  ungroup() |>
+  select(no_of_valid_days, Dataset, value) |>
+  pivot_wider(names_from = Dataset, values_from = value)
+
+table_total <- df_days |>
+  count(no_of_valid_days, name = "n") |>
+  mutate(
+    percent = 100 * n / sum(n),
+    `Total (2011-14)` = paste0(format(n, big.mark = "", scientific = FALSE, trim = TRUE),
+                                " (", format_decimal(percent, 1), ")")
+  ) |>
+  select(no_of_valid_days, `Total (2011-14)`)
+
+sample_row <- df_days |>
+  count(Dataset, name = "n") |>
+  mutate(value = paste0(format(n, big.mark = "", scientific = FALSE, trim = TRUE),
+                        " (100.0)")) |>
+  select(Dataset, value) |>
+  pivot_wider(names_from = Dataset, values_from = value) |>
+  mutate(
+    no_of_valid_days = "Sample analyzed (1+)",
+    `Total (2011-14)` = paste0(format(nrow(df_days), big.mark = "", scientific = FALSE, trim = TRUE),
+                                " (100.0)")
+  )
+
+table1 <- table_by_cycle |>
+  left_join(table_total, by = "no_of_valid_days") |>
+  arrange(no_of_valid_days) |>
+  mutate(no_of_valid_days = as.character(no_of_valid_days)) |>
+  bind_rows(sample_row) |>
+  select(
+    `Valid days` = no_of_valid_days,
+    `2011-2012`, `2013-2014`, `Total (2011-14)`
+  )
+
+write_csv(table1, file.path(output_root, "tables", "table1_valid_days.csv"))
+paper_kable(table1, "Adult CRIB analytic sample and valid measurement-day distribution by NHANES cycle.")
+```
+
+## Hourly waking sedentary profile
+
+The hourly analysis includes all 60 minute samples in each hour of an eligible
+day. Panel A is the sum of sitting fractions during CRIB wake divided by all
+minutes in the hour, multiplied by 100. Panel B shows average wake minutes
+within each hour. Fully asleep hours contribute zero to both panels rather than being omitted.
+Both panels average days within participant and weekday/weekend category before
+applying the NHANES survey weights. Participants need at least one eligible day
+of the relevant day type; this requirement is independent of wake time at any
+hour. Each labeled hour denotes the hour beginning at that time (00:00 means
+00:00--00:59).
+
+```{r hourly-profile, fig.width=11, fig.height=5.6, dpi=320, fig.retina=2, out.width="100%"}
+if (!all(c("total_minutes", "sitting_percent_hour") %in% names(hourly_sitting_daily))) {
+  stop("Regenerate hourly summaries: full-hour denominators and sleeping hours are required.")
+}
+if (anyNA(hourly_sitting_daily$total_minutes) || any(hourly_sitting_daily$total_minutes != 60)) {
+  stop("Hourly analysis requires 60 recorded minutes per eligible hour.")
+}
+hourly_day_coverage <- hourly_sitting_daily |>
+  count(participant_id, dataset, nhanes_wear_day)
+if (any(hourly_day_coverage$n != 24)) {
+  stop("Hourly summaries must retain all 24 hours, including fully asleep hours.")
+}
+
+hourly_participant <- hourly_sitting_daily |>
+  rename(ID = participant_id, Dataset = dataset) |>
+  mutate(
+    ID = as.character(ID),
+    Dataset = as.character(Dataset)
+  ) |>
+  semi_join(analytic_df, by = c("ID", "Dataset")) |>
+  group_by(ID, Dataset, day_type, hour_of_day) |>
+  summarise(
+    no_of_valid_days = n_distinct(nhanes_wear_day),
+    est_wake_hours = mean(wake_hours, na.rm = TRUE),
+    est_sitting_hours = mean(sitting_hours, na.rm = TRUE),
+    est_sitting_percent_hour = mean(sitting_percent_hour, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  filter(no_of_valid_days >= minimum_days) |>
+  left_join(participant_metadata, by = c("ID", "Dataset")) |>
+  left_join(nhanes_age, by = c("ID", "Dataset")) |>
+  filter(
+    age_years >= 18,
+    !is.na(Exam_weight_recal), !is.na(PSU), !is.na(Stratum)
+  )
+
+hourly_design <- svy_design(hourly_participant)
+hourly_estimates <- svyby(
+  ~est_sitting_percent_hour,
+  ~day_type + hour_of_day,
+  hourly_design,
+  svymean,
+  vartype = "ci",
+  na.rm = TRUE
+) |>
+  as_tibble() |>
+  rename(
+    mean_sitting_percent_hour = est_sitting_percent_hour,
+    lower_ci = ci_l,
+    upper_ci = ci_u
+  )
+
+hourly_wake_estimates <- svyby(
+  ~est_wake_hours,
+  ~day_type + hour_of_day,
+  hourly_design,
+  svymean,
+  vartype = "ci",
+  na.rm = TRUE
+) |>
+  as_tibble() |>
+  rename(
+    mean_wake_hours = est_wake_hours,
+    lower_wake_ci = ci_l,
+    upper_wake_ci = ci_u
+  )
+
+hourly_estimates <- hourly_estimates |>
+  left_join(hourly_wake_estimates, by = c("day_type", "hour_of_day")) |>
+  mutate(
+    mean_wake_minutes = 60 * mean_wake_hours,
+    lower_wake_minutes_ci = 60 * lower_wake_ci,
+    upper_wake_minutes_ci = 60 * upper_wake_ci
+  )
+
+write_csv(
+  format_export_numbers(hourly_estimates),
+  file.path(output_root, "results", "hourly_crib_waking_sedentary.csv")
+)
+
+hourly_analytic_n <- n_distinct(analytic_df$ID, analytic_df$Dataset)
+hourly_coverage <- hourly_participant |>
+  group_by(day_type, hour_of_day) |>
+  summarise(n_participants = n_distinct(ID, Dataset), .groups = "drop") |>
+  complete(
+    day_type = c("Weekend", "Weekday"),
+    hour_of_day = 0:23,
+    fill = list(n_participants = 0L)
+  ) |>
+  mutate(
+    day_type = factor(day_type, levels = c("Weekend", "Weekday")),
+    percent_analytic_participants = 100 * n_participants / hourly_analytic_n
+  )
+
+write_csv(
+  hourly_coverage,
+  file.path(output_root, "results", "hourly_crib_participant_coverage.csv")
+)
+
+hourly_panel_theme <- theme_bw(base_size = 16) +
+  theme(
+    plot.title = element_text(face = "bold", size = 18, hjust = 0.5, margin = margin(b = 7)),
+    plot.subtitle = element_text(face = "bold", size = 17, color = "black", hjust = 0.5, margin = margin(b = 9)),
+    axis.title = element_text(face = "bold", size = 16),
+    axis.text = element_text(color = "black", size = 13),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(color = "black", linewidth = 0.8),
+    axis.ticks = element_line(color = "black", linewidth = 0.65),
+    axis.ticks.length = grid::unit(0.09, "in"),
+    legend.text = element_text(size = 14, face = "bold"),
+    legend.key.width = grid::unit(0.27, "in"),
+    legend.key.height = grid::unit(0.20, "in")
+  )
+
+hourly_plot <- ggplot(
+  hourly_estimates,
+  aes(x = hour_of_day, y = mean_sitting_percent_hour, group = day_type)
+) +
+  geom_ribbon(aes(ymin = lower_ci, ymax = upper_ci, fill = day_type), alpha = 0.25, color = NA) +
+  geom_line(aes(color = day_type, linetype = day_type), linewidth = 1.35) +
+  geom_point(aes(color = day_type, shape = day_type), size = 2.8, fill = "white") +
+  scale_x_continuous(
+    breaks = seq(0, 18, 6), minor_breaks = 0:23,
+    labels = function(x) sprintf("%02d:00", as.integer(x)), limits = c(0, 23)
+  ) +
+  scale_y_continuous(labels = percent_format(scale = 1), limits = c(0, 100), breaks = seq(0, 100, 20)) +
+  scale_color_manual(values = c(Weekend = "#0072B2", Weekday = "#D55E00")) +
+  scale_fill_manual(values = c(Weekend = "#0072B2", Weekday = "#D55E00")) +
+  labs(title = "Waking sedentary profile", x = "Clock hour (beginning)", y = "Waking sedentary time (% of hour)", color = NULL, fill = NULL, linetype = NULL, shape = NULL) +
+  guides(fill = "none") +
+  hourly_panel_theme +
+  theme(legend.position = "bottom")
+
+hourly_wake_plot <- ggplot(
+  hourly_estimates,
+  aes(x = hour_of_day, y = mean_wake_minutes, group = day_type)
+) +
+  geom_ribbon(aes(ymin = lower_wake_minutes_ci, ymax = upper_wake_minutes_ci, fill = day_type), alpha = 0.25, color = NA) +
+  geom_line(aes(color = day_type, linetype = day_type), linewidth = 1.35) +
+  geom_point(aes(color = day_type, shape = day_type), size = 2.8, fill = "white") +
+  scale_x_continuous(
+    breaks = seq(0, 18, 6), minor_breaks = 0:23,
+    labels = function(x) sprintf("%02d:00", as.integer(x)), limits = c(0, 23)
+  ) +
+  scale_y_continuous(
+    name = "Average wake time (minutes)",
+    limits = c(0, 60), breaks = seq(0, 60, 15)
+  ) +
+  scale_color_manual(values = c(Weekend = "#0072B2", Weekday = "#D55E00")) +
+  scale_fill_manual(values = c(Weekend = "#0072B2", Weekday = "#D55E00")) +
+  labs(title = "Average wake time\nby hour", x = "Clock hour (beginning)", color = NULL, fill = NULL, linetype = NULL, shape = NULL) +
+  guides(color = "none", fill = "none", linetype = "none", shape = "none") +
+  hourly_panel_theme
+
+hourly_profile_figure <- hourly_plot + hourly_wake_plot +
+  plot_layout(widths = c(1.25, 1), guides = "collect") +
+  plot_annotation(
+    tag_levels = "A",
+    caption = "Each value summarizes the hour beginning at its label (e.g., 00:00 = 00:00--00:59)."
+  ) &
+  theme(
+    legend.position = "bottom",
+    legend.text = element_text(size = 14, face = "bold"),
+    legend.key.width = grid::unit(0.27, "in"),
+    legend.key.height = grid::unit(0.20, "in"),
+    legend.box.margin = margin(t = 5, b = 2),
+    plot.tag = element_text(face = "bold", size = 20),
+    plot.tag.position = c(0, 1),
+    plot.caption = element_text(face = "bold", size = 15, color = "black", hjust = 0.5, margin = margin(t = 13)),
+    plot.margin = margin(t = 10, r = 12, b = 8, l = 10)
+  )
+
+save_figure(hourly_profile_figure, "figure2_crib_hourly_waking_sedentary", 11, 5.6, dpi = 600)
+hourly_profile_figure
+```
+
+## Figure 3: sedentary-time distribution and 24-hour composition
+
+```{r figure-3, fig.width=12.5, fig.height=6.5, dpi=320, fig.retina=2, out.width="100%"}
+df_plot <- analytic_df |>
+  distinct(ID, Dataset, .keep_all = TRUE) |>
+  mutate(
+    sed_bin = cut(
+      est_sedentary_hours,
+      breaks = c(-Inf, 6, 8, 10, 12, 14, Inf),
+      labels = c("0-6", "6-8", "8-10", "10-12", "12-14", "14+"),
+      include.lowest = TRUE, right = FALSE
+    )
+  ) |>
+  filter(!is.na(sed_bin))
+
+plot_df <- df_plot |>
+  count(sed_bin, name = "n") |>
+  mutate(
+    prop = n / nrow(df_plot),
+    label = paste0("n=", format(n, big.mark = "", scientific = FALSE, trim = TRUE),
+                   "\n", percent(prop, accuracy = 0.1))
+  )
+
+figure3_theme <- theme_bw(base_size = 20) +
+  theme(
+    axis.title = element_text(face = "bold", size = 20),
+    axis.text = element_text(color = "black", face = "bold", size = 18),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(color = "black", linewidth = 1),
+    axis.ticks = element_line(color = "black", linewidth = 0.85),
+    axis.ticks.length = grid::unit(0.14, "in")
+  )
+
+left_plot <- ggplot(plot_df, aes(x = sed_bin, y = prop)) +
+  geom_col(width = 0.5, fill = "#4E79A7", color = "black", linewidth = 0.5) +
+  geom_text(aes(label = label), vjust = -0.35, size = 4.8, lineheight = 0.92, fontface = "bold") +
+  scale_x_discrete(expand = expansion(add = 0.7)) +
+  scale_y_continuous(labels = percent_format(accuracy = 1), expand = expansion(mult = c(0, 0.24))) +
+  labs(x = "Sedentary time (h/day)", y = "Participants (%)", tag = "A") +
+  coord_cartesian(clip = "off") +
+  figure3_theme +
+  theme(axis.text.x = element_text(angle = 25, hjust = 1, vjust = 1), panel.grid.major.x = element_blank(), panel.grid.major.y = element_line(color = "grey86", linewidth = 0.45))
+
+right_df <- df_plot |>
+  group_by(sed_bin) |>
+  summarise(
+    Sedentary = mean(est_sedentary_hours, na.rm = TRUE),
+    Sleep = mean(est_sleep_hours, na.rm = TRUE),
+    `Non-sedentary` = mean(24 - est_sedentary_hours - est_sleep_hours, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  pivot_longer(c(Sleep, Sedentary, `Non-sedentary`), names_to = "behavior", values_to = "hours") |>
+  mutate(behavior = factor(behavior, levels = c("Sleep", "Sedentary", "Non-sedentary")))
+
+right_label_df <- right_df |>
+  mutate(
+    behavior = factor(behavior, levels = c("Non-sedentary", "Sedentary", "Sleep"))
+  ) |>
+  arrange(sed_bin, behavior) |>
+  group_by(sed_bin) |>
+  mutate(
+    x_mid = cumsum(hours) - hours / 2,
+    percent_label = percent(hours / 24, accuracy = 1),
+    label_color = if_else(behavior %in% c("Non-sedentary", "Sedentary"), "white", "black")
+  ) |>
+  ungroup()
+
+right_plot <- ggplot(right_df, aes(x = hours, y = sed_bin, fill = behavior)) +
+  geom_col(width = 0.72, color = "white", linewidth = 0.65) +
+  geom_text(
+    data = right_label_df,
+    aes(x = x_mid, y = sed_bin, label = percent_label, color = label_color),
+    inherit.aes = FALSE,
+    size = 5.8,
+    fontface = "bold"
+  ) +
+  scale_fill_manual(values = c(Sleep = "#9ECAE1", Sedentary = "#4E79A7", `Non-sedentary` = "#59A14F")) +
+  scale_color_identity(guide = "none") +
+  guides(fill = guide_legend(reverse = TRUE, nrow = 1, byrow = TRUE)) +
+  scale_x_continuous(breaks = seq(0, 24, by = 4), expand = expansion(mult = c(0, 0.02))) +
+  coord_cartesian(xlim = c(0, 24), clip = "off") +
+  labs(x = "Hours/day", y = "Sedentary time (h/day)", fill = NULL, tag = "B") +
+  figure3_theme +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.grid.major.x = element_line(color = "grey86", linewidth = 0.45),
+    legend.position = "bottom",
+    legend.text = element_text(size = 18, face = "bold", color = "black"),
+    legend.key.width = grid::unit(0.40, "in"),
+    legend.key.height = grid::unit(0.32, "in"),
+    legend.spacing.x = grid::unit(0.22, "in"),
+    plot.margin = margin(t = 16, r = 10, b = 12, l = 10)
+  )
+
+figure3 <- left_plot + right_plot +
+  plot_layout(widths = c(1.55, 1.35), guides = "collect") &
+  theme(
+    legend.position = "bottom",
+    legend.text = element_text(size = 18, face = "bold", color = "black"),
+    legend.key.width = grid::unit(0.40, "in"),
+    legend.key.height = grid::unit(0.32, "in"),
+    plot.tag = element_text(face = "bold", size = 27),
+    plot.tag.position = c(0.02, 1.02),
+    plot.margin = margin(t = 22, r = 12, b = 12, l = 12)
+  )
+
+write_csv(format_export_numbers(right_df), file.path(output_root, "results", "adult_24h_composition.csv"))
+save_figure(figure3, "figure3_crib_sedentary_distribution_with_24h_composition", 12.5, 6.5, dpi = 600)
+figure3
+```
+
+## Figure 4: waking sedentary-bout duration
+
+A waking sedentary bout was defined as consecutive one-minute records classified
+as CRIB wake with `chap_sitting_fraction >= 0.50`; bouts were not continued
+across calendar-day boundaries. For each participant-cycle, the mean bout
+duration was calculated within each retained day and then averaged across days.
+Thus, the figure describes the distribution of participant-average bout
+duration rather than the distribution of raw individual bouts.
+
+```{r figure-4-waking-sedentary-bouts, fig.width=16, fig.height=6.8, out.width="100%"}
+bout_figure_file <- file.path(figure_root, "figure4_crib_waking_sedentary_bouts.png")
+bout_group_file <- file.path(crib_results_dir, "sedentary_bout_group_summary.csv")
+if (!file.exists(bout_figure_file) || !file.exists(bout_group_file)) {
+  stop(
+    "Missing waking sedentary-bout outputs. Run R/plot_crib_waking_sedentary_bouts.R first.",
+    call. = FALSE
+  )
+}
+bout_group_summary <- read_csv(bout_group_file, show_col_types = FALSE)
+# Do not silently present a figure from an older cohort.
+stopifnot(sum(bout_group_summary$n_participants) == nrow(analytic_df))
+knitr::include_graphics(normalizePath(bout_figure_file), rel_path = FALSE)
+```
+
+**Figure 4. Average waking sedentary-bout duration in the final adult NHANES +
+CRIB sample.** (A) Distribution of participant-average waking sedentary-bout
+duration, grouped into 10-minute intervals; bars are labelled with the number
+and percentage of participants. (B) Distribution of participant-average bout
+duration by mean waking sedentary-time group. The annotation identifies the
+groups with the shortest and longest mean bout duration; boxes show the
+interquartile range and whiskers show the non-outlying range.
+
+## Figure 5: CRIB parameter sensitivity
+
+```{r figure-5-crib-parameter-sensitivity, out.width="100%"}
+sensitivity_figure_estimates <- read_csv(file.path(output_root,"parameter_sensitivity","crib_sensitivity_weighted_estimates.csv"),show_col_types=FALSE)
+stopifnot(nrow(sensitivity_figure_estimates)==36L,
+  all(sensitivity_figure_estimates$n==nrow(analytic_df)),
+  all(sensitivity_figure_estimates$days==nrow(primary_days)),
+  all(sensitivity_figure_estimates$primary_days_md5==unname(tools::md5sum(file.path(output_root,"datasets","primary_daily_sitting.csv")))))
+knitr::include_graphics(normalizePath(file.path(figure_root,"figure5_crib_parameter_sensitivity.png")),rel_path=FALSE)
+```
+
+**Figure 5. Survey-weighted estimated sleep, waking sedentary time, and waking
+time across CRIB parameter settings in the adult analytic sample
+(N = `r comma(nrow(analytic_df))`).** Lines show estimates for required sleep
+thresholds of 70%, 80%, and 90% across minimum bout durations of 20, 30, 45,
+and 60 minutes; error bars indicate pointwise 95% confidence intervals.
+All settings use the same participants and eligible days. The sleep estimate
+is time excluded from waking by CRIB, including interruptions within sleep bouts.
+
+## Adult subgroup estimates
+
+```{r primary-subgroup-composition}
+primary_subgroup_estimates <- bind_rows(lapply(c("Age_group","Gender","Race","BMI_cat_crib","Education","Marital_status"),function(variable) {
+  bind_rows(lapply(sort(unique(analytic_df[[variable]][!is.na(analytic_df[[variable]])])),function(level) {
+    d <- analytic_design[!is.na(analytic_design$variables[[variable]]) & analytic_design$variables[[variable]]==level,]
+    m <- svymean(~est_sedentary_hours+est_sleep_hours+est_waking_hours+est_nonsedentary_hours,d)
+    ci <- confint(m)
+    tibble(subgroup=variable,category=level,n=nrow(d$variables),measure=names(coef(m)),mean_hours=as.numeric(coef(m)),lower_95=ci[,1],upper_95=ci[,2])
+  }))
+}))
+write_csv(primary_subgroup_estimates,file.path(output_root,"tables","primary_subgroup_time_estimates.csv"))
+paper_kable(primary_subgroup_estimates |>
+  filter(subgroup=="Age_group",measure %in% c("est_sedentary_hours","est_sleep_hours")) |>
+  mutate(measure=recode(measure,est_sedentary_hours="Sedentary",est_sleep_hours="CRIB-excluded time"),
+         estimate=sprintf("%.2f (%.2f–%.2f)",mean_hours,lower_95,upper_95)) |>
+  select(Age=category,N=n,measure,estimate) |> pivot_wider(names_from=measure,values_from=estimate),
+  "Primary age-specific waking sedentary and CRIB-excluded time, hours/day (95% CI).")
+```
+
+
+```{r subgroup-functions}
+weighted_subgroup_table <- function(data, variable, levels, label) {
+  map_dfr(levels, function(level) {
+    subset_data <- data |> filter(.data[[variable]] == level)
+    if (nrow(subset_data) == 0L) {
+      return(tibble(Subgroup = label, Category = level, N = 0, Mean = NA_real_, SE = NA_real_, Lower = NA_real_, Upper = NA_real_))
+    }
+    estimate <- svymean(~est_sedentary_hours, svy_design(subset_data), na.rm = TRUE)
+    tibble(
+      Subgroup = label,
+      Category = level,
+      N = n_distinct(subset_data$ID),
+      Mean = unname(coef(estimate)[1]),
+      SE = unname(SE(estimate)[1]),
+      Lower = Mean - 1.96 * SE,
+      Upper = Mean + 1.96 * SE
+    )
+  })
+}
+
+age_levels <- c("18-24", "25-44", "45-64", "65+")
+if (!all(age_levels %in% unique(analytic_df$Age_group))) {
+  age_levels <- sort(unique(analytic_df$Age_group[!is.na(analytic_df$Age_group)]))
+}
+
+format_n_pct <- function(data, denominator) {
+  paste0(
+    format(n_distinct(data$ID), big.mark = "", scientific = FALSE, trim = TRUE),
+    " (", format_decimal(100 * n_distinct(data$ID) / denominator, 1), "%)"
+  )
+}
+
+subgroup_cell <- function(data, variable, level, cycle = NULL) {
+  analysis_data <- if (is.null(cycle)) {
+    data
+  } else {
+    data |> filter(Dataset == cycle)
+  }
+  subset_data <- analysis_data |>
+    filter(.data[[variable]] == level)
+  if (nrow(subset_data) == 0L) return(NA_character_)
+  estimate <- svymean(~est_sedentary_hours, svy_design(subset_data), na.rm = TRUE)
+  interval <- confint(estimate)
+  paste0(
+    format_n_pct(subset_data, n_distinct(analysis_data$ID)), ", ",
+    format_decimal(coef(estimate)[[1]], 2),
+    " (", format_decimal(interval[1, 1], 2), ", ",
+    format_decimal(interval[1, 2], 2), ")"
+  )
+}
+
+format_p_value <- function(p_value) {
+  if (is.na(p_value)) return(NA_character_)
+  if (p_value < 0.001) return("<0.001")
+  format_decimal(p_value, 3)
+}
+
+# Design-based omnibus Wald test for equality of the subgroup-specific means.
+# The p value is reported once on the first row of each subgroup, rather than
+# repeatedly beside every category; it is not a comparison with a reference
+# category and has no multiplicity adjustment.
+subgroup_omnibus_p <- function(data, variable) {
+  test_data <- data |>
+    filter(!is.na(.data[[variable]])) |>
+    mutate(.subgroup = factor(.data[[variable]]))
+  if (n_distinct(test_data$.subgroup) < 2L) return(NA_real_)
+  fit <- svyglm(est_sedentary_hours ~ .subgroup, design = svy_design(test_data))
+  as.numeric(regTermTest(fit, ~.subgroup)$p)
+}
+
+make_cycle_subgroup_table <- function(data, variable, levels, label) {
+  omnibus_p <- subgroup_omnibus_p(data, variable)
+  map_dfr(seq_along(levels), function(index) {
+    level <- levels[[index]]
+    tibble(
+      Subgroup = label,
+      Category = level,
+      `P value` = if (index == 1L) format_p_value(omnibus_p) else "",
+      `Pooled (2011-2014): n (%) and mean (95% CI)` = subgroup_cell(data, variable, level),
+      `2011-2012: n (%) and mean (95% CI)` = subgroup_cell(data, variable, level, "2011-2012"),
+      `2013-2014: n (%) and mean (95% CI)` = subgroup_cell(data, variable, level, "2013-2014")
+    )
+  })
+}
+
+race_levels <- sort(unique(analytic_df$Race[!is.na(analytic_df$Race)]))
+bmi_levels <- c("underweight", "normal weight", "overweight", "obesity")
+table3 <- bind_rows(
+  make_cycle_subgroup_table(analytic_df, "Age_group", age_levels, "Age group"),
+  make_cycle_subgroup_table(analytic_df, "Gender", c("Male", "Female"), "Gender")
+)
+
+table4 <- bind_rows(
+  make_cycle_subgroup_table(analytic_df, "Race", race_levels, "Race/ethnicity"),
+  make_cycle_subgroup_table(analytic_df, "BMI_cat_crib", bmi_levels, "BMI category")
+)
+
+table5 <- bind_rows(
+  make_cycle_subgroup_table(analytic_df, "Age_group", age_levels, "Age group"),
+  make_cycle_subgroup_table(analytic_df, "Gender", c("Male", "Female"), "Gender"),
+  make_cycle_subgroup_table(analytic_df, "Race", race_levels, "Race/ethnicity"),
+  make_cycle_subgroup_table(analytic_df, "BMI_cat_crib", bmi_levels, "BMI category"),
+  make_cycle_subgroup_table(analytic_df, "Education", sort(unique(analytic_df$Education[!is.na(analytic_df$Education)])), "Education"),
+  make_cycle_subgroup_table(analytic_df, "Marital_status", sort(unique(analytic_df$Marital_status[!is.na(analytic_df$Marital_status)])), "Marital status")
+)
+
+write_csv(format_export_numbers(table3), file.path(output_root, "tables", "table3_age_gender_sedentary.csv"))
+write_csv(format_export_numbers(table4), file.path(output_root, "tables", "table4_race_bmi_sedentary.csv"))
+write_csv(format_export_numbers(table5), file.path(output_root, "tables", "table5_marginal_subgroup_sedentary.csv"))
+```
+
+### Table 3
+
+```{r table-3}
+paper_kable(table3, "Adult CRIB sedentary time by age group and gender, pooled and by NHANES cycle. P values are design-based omnibus Wald tests of equality across levels within each subgroup.")
+```
+
+### Table 4
+
+```{r table-4}
+paper_kable(table4, "Adult CRIB sedentary time by race/ethnicity and BMI category, pooled and by NHANES cycle. P values are design-based omnibus Wald tests of equality across levels within each subgroup.")
+```
+
+### Supplementary Table S1
+
+```{r table-5}
+paper_kable(table5, "Adult CRIB sedentary time by demographic subgroup, pooled and by NHANES cycle. P values are design-based omnibus Wald tests of equality across levels within each subgroup.")
+```
+
+### Table 5
+
+```{r table-5-sex-gender-age}
+format_mean_ci <- function(data) {
+  if (nrow(data) == 0L) return(NA_character_)
+  estimate <- svymean(~est_sedentary_hours, svy_design(data), na.rm = TRUE)
+  interval <- confint(estimate)
+  paste0(
+    format_decimal(coef(estimate)[[1]], 2),
+    " (", format_decimal(interval[1, 1], 2), ", ",
+    format_decimal(interval[1, 2], 2), ")"
+  )
+}
+
+pooled_adult_n <- n_distinct(analytic_df$ID, analytic_df$Dataset)
+
+format_pooled_n_pct <- function(data) {
+  paste0(
+    format(n_distinct(data$ID, data$Dataset), big.mark = ",", scientific = FALSE, trim = TRUE),
+    " (", format_decimal(100 * n_distinct(data$ID, data$Dataset) / pooled_adult_n, 1), "%)"
+  )
+}
+
+sex_age_cell <- function(data, sex) {
+  subset_data <- data |> filter(Gender == sex)
+  list(
+    n_pct = format_pooled_n_pct(subset_data),
+    mean_ci = format_mean_ci(subset_data)
+  )
+}
+
+make_sex_age_row <- function(label, data) {
+  male <- sex_age_cell(data, "Male")
+  female <- sex_age_cell(data, "Female")
+  tibble(
+    `Age group` = label,
+    `Male n (%)` = male$n_pct,
+    `Male mean (95% CI)` = male$mean_ci,
+    `Female n (%)` = female$n_pct,
+    `Female mean (95% CI)` = female$mean_ci
+  )
+}
+
+current_age_levels <- c("18-34", "35-44", "45-64", ">=65")
+current_age_levels <- current_age_levels[current_age_levels %in% unique(analytic_df$Age_group)]
+if (length(current_age_levels) == 0L) {
+  current_age_levels <- sort(unique(analytic_df$Age_group[!is.na(analytic_df$Age_group)]))
+}
+
+table5_sex_age <- bind_rows(
+  make_sex_age_row("All adults", analytic_df),
+  map_dfr(
+    current_age_levels,
+    function(age_level) {
+      make_sex_age_row(age_level, analytic_df |> filter(Age_group == age_level))
+    }
+  )
+)
+
+write_csv(
+  table5_sex_age,
+  file.path(output_root, "tables", "table5_sex_gender_by_age_sedentary.csv")
+)
+
+paper_kable(
+  table5_sex_age,
+  "Weighted time spent in sedentary behavior (mean hours/day), by sex/gender and age, United States, 2011--2014."
+)
+```
+
+**Note.** Mean sedentary time and 95% confidence intervals are survey-weighted
+NHANES 2011--2014 estimates. Counts and percentages are unweighted and use the
+pooled adult analytic sample as the denominator. CI = confidence interval.
+
+### Table 6
+
+```{r table-6-race-bmi}
+race_bmi_cell <- function(data, bmi_level) {
+  format_mean_ci(data |> filter(BMI_cat_crib == bmi_level))
+}
+
+make_race_bmi_row <- function(label, data) {
+  tibble(
+    `Race/ethnicity` = label,
+    Underweight = race_bmi_cell(data, "underweight"),
+    `Normal weight` = race_bmi_cell(data, "normal weight"),
+    Overweight = race_bmi_cell(data, "overweight"),
+    Obesity = race_bmi_cell(data, "obesity")
+  )
+}
+
+table6_race_bmi <- bind_rows(
+  make_race_bmi_row("All adults", analytic_df),
+  map_dfr(
+    race_levels,
+    function(race_level) {
+      make_race_bmi_row(race_level, analytic_df |> filter(Race == race_level))
+    }
+  )
+)
+
+write_csv(
+  table6_race_bmi,
+  file.path(output_root, "tables", "table6_race_bmi_sedentary.csv")
+)
+
+paper_kable(
+  table6_race_bmi,
+  "Survey-weighted mean sedentary time (hours/day) by race/ethnicity and BMI category, NHANES 2011--2014."
+)
+```
+
+**Note.** Values are survey-weighted mean hours/day (95% CI). NH =
+non-Hispanic; BMI = body mass index; CI = confidence interval.
+
+## Output index
+
+```{r output-index}
+output_index <- tibble(
+  output = c(
+    "Main estimates", "Cycle estimates", "Pooled/cycle time estimates", "Cycle comparison", "Four-method waking-time comparison", "Minimum-two-day sensitivity", "CRIB parameter sensitivity: paired differences", "CRIB parameter sensitivity: numeric estimates and tests", "Table 1", "Table 2", "Table 3", "Table 4", "Supplementary Table S1", "Table 5", "Table 6",
+    "Hourly CRIB estimates", "Hourly participant coverage", "24-hour composition", "Figure 1", "Figure 2", "Figure 3", "Figure 4", "Supplementary Figure S1", "Supplementary Figure S2: retained non-wear durations", "Retained non-wear duration distribution"
+  ),
+  path = c(
+    file.path(output_root, "results", "main_estimates.csv"),
+    file.path(output_root, "results", "cycle_estimates.csv"),
+    file.path(output_root, "tables", "table_pooled_cycle_time_estimates.csv"),
+    file.path(output_root, "results", "cycle_comparison.csv"),
+    file.path(output_root, "tables", "table_four_method_waking_time_comparison.csv"),
+    file.path(primary_qc_root, "minimum_two_day_sensitivity.csv"),
+    file.path(output_root, "parameter_sensitivity", "table_sedentary_differences.csv"),
+    file.path(output_root, "parameter_sensitivity", "paired_sedentary_differences.csv"),
+    file.path(output_root, "tables", "table1_valid_days.csv"),
+    file.path(output_root, "tables", "table2_study_comparison.csv"),
+    file.path(output_root, "tables", "table3_age_gender_sedentary.csv"),
+    file.path(output_root, "tables", "table4_race_bmi_sedentary.csv"),
+    file.path(output_root, "tables", "table5_marginal_subgroup_sedentary.csv"),
+    file.path(output_root, "tables", "table5_sex_gender_by_age_sedentary.csv"),
+    file.path(output_root, "tables", "table6_race_bmi_sedentary.csv"),
+    file.path(output_root, "results", "hourly_crib_waking_sedentary.csv"),
+    file.path(output_root, "results", "hourly_crib_participant_coverage.csv"),
+    file.path(output_root, "results", "adult_24h_composition.csv"),
+    file.path(figure_root, "figure1_crib_classification_workflow.png"),
+    file.path(figure_root, "figure2_crib_hourly_waking_sedentary.png"),
+    file.path(figure_root, "figure3_crib_sedentary_distribution_with_24h_composition.png"),
+    file.path(figure_root, "figure4_crib_waking_sedentary_bouts.png"),
+    file.path(figure_root, "figure_s1_crib_sample_inclusion_flow.png"),
+    file.path(figure_root, "figure_s2_retained_nonwear_duration.png"),
+    file.path(primary_qc_root, "retained_nonwear_duration_distribution.csv")
+  )
+)
+output_index <- bind_rows(output_index,tibble(
+  output=c("Original NHANES non-wear distribution", "Original versus retained run-length verification"),
+  path=c(file.path(original_nw_root,"duration_summary_by_scope.csv"),
+         file.path(original_nw_root,"original_vs_retained_run_lengths.csv"))))
+output_index <- bind_rows(output_index,tibble(
+  output=c("Figure 5: CRIB parameter sensitivity", "CRIB parameter sensitivity: absolute time estimates"),
+  path=c(file.path(figure_root,"figure5_crib_parameter_sensitivity.png"),
+         file.path(output_root,"parameter_sensitivity","crib_sensitivity_weighted_estimates.csv"))))
+stopifnot(all(startsWith(output_index$path, paste0(project_root, .Platform$file.sep))))
+output_index <- output_index |>
+  mutate(path = substring(path, nchar(project_root) + 2L))
+write_csv(output_index, file.path(output_root, "output_index.csv"))
+paper_kable(output_index, "CRIB adult analysis output index.")
+```

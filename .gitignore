@@ -20,24 +20,48 @@ renv/staging/
 data/*
 !data/self-sleep-2011-12.xpt
 !data/self-sleep-2013-14.xpt
+!data/nhanes-demo-2011-2012.xpt
+!data/nhanes-demo-2013-2014.xpt
+!data/nhanes-bmx-2011-2012.xpt
+!data/nhanes-bmx-2013-2014.xpt
 !data/top_level_data_1h_epoch/
 !data/top_level_data_1h_epoch/**
 
-# Keep only the canonical final-analysis outputs.
+# Keep the small products of the final adult CRIB report. Large source summaries,
+# minute records, audit inputs, and sensitivity batches remain local/cluster data.
 outputs/*
-!outputs/final_analysis/
-!outputs/final_analysis/**
+!outputs/final_analysis_crib_adult/
+outputs/final_analysis_crib_adult/*
+!outputs/final_analysis_crib_adult/output_index.csv
+!outputs/final_analysis_crib_adult/tables/
+!outputs/final_analysis_crib_adult/tables/**
+!outputs/final_analysis_crib_adult/datasets/
+outputs/final_analysis_crib_adult/datasets/*
+!outputs/final_analysis_crib_adult/datasets/primary_analytic_participants.csv
+!outputs/final_analysis_crib_adult/datasets/primary_daily_sitting.csv
+!outputs/final_analysis_crib_adult/parameter_sensitivity/
+outputs/final_analysis_crib_adult/parameter_sensitivity/*
+!outputs/final_analysis_crib_adult/parameter_sensitivity/*.csv
+!outputs/final_analysis_crib_adult/parameter_sensitivity/*.html
+!outputs/final_analysis_crib_adult/parameter_sensitivity/*.pdf
+!outputs/final_analysis_crib_adult/parameter_sensitivity/*.tex
 
 figures/*
-!figures/final_analysis/
-!figures/final_analysis/**
+!figures/final_analysis_crib_adult/
+!figures/final_analysis_crib_adult/**
 
 reports/rendered/*
-!reports/rendered/final_analysis.html
-!reports/rendered/final_analysis.pdf
+!reports/rendered/final_analysis_crib_adult.html
+!reports/rendered/final_analysis_crib_adult.pdf
 
 # Legacy/local processing material.
 cluster/
 maintainer/
 model=CHAP/
 lme4/
+
+# Archived session state and generated caches.
+old/*
+old/.RData
+old/.Rhistory
+old/**/__pycache__/
