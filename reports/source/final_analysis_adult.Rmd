@@ -334,6 +334,12 @@ survey_design_frame <- participant_metadata |>
 ## adult CRIB analytic domain.
 full_accelerometer_design <- svy_design(survey_design_frame)
 analytic_design <- subset(full_accelerometer_design, in_adult_crib_domain)
+eligible_day_fit <- svymean(~no_of_valid_days, analytic_design, na.rm = TRUE)
+eligible_day_ci <- confint(eligible_day_fit)
+stopifnot(
+  length(coef(eligible_day_fit)) == 1L,
+  all(is.finite(c(coef(eligible_day_fit), eligible_day_ci)))
+)
 if (apply_primary_day_rule) {
   primary_days <- daily_sitting |> semi_join(analytic_df, by = c("participant_id"="ID", "dataset"="Dataset"))
   write_csv(primary_days, file.path(analytic_data_root, "primary_daily_sitting.csv"))
@@ -460,6 +466,9 @@ flow_plot
 The final sample includes **`r comma(nrow(analytic_df))` adults
 (`r format_decimal(100 * nrow(analytic_df) / flow_technical_days, 1)`% of adults
 with at least one complete day)** and `r comma(nrow(primary_days))` eligible days.
+Participants contributed a survey-weighted mean of
+**`r format_decimal(as.numeric(coef(eligible_day_fit)), 2)` eligible days
+(95% CI, `r format_decimal(eligible_day_ci[1, 1], 2)`--`r format_decimal(eligible_day_ci[1, 2], 2)`)**.
 One adult had no complete days containing CRIB wake minutes; another
 `r comma(flow_nonwear_restricted_excluded)` adults had no days remaining after
 the bounded non-wear screen. This screen allows matching as well as differing
