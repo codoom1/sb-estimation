@@ -17,7 +17,7 @@ project_root <- normalizePath(
 )
 results_dir <- get_arg(
   "results-dir",
-  file.path(project_root, "outputs", "final_analysis_crib_adult", "results")
+  file.path(project_root, "outputs", "final_analysis_adult", "results")
 )
 
 read_parts <- function(pattern) {

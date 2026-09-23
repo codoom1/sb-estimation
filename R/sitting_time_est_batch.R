@@ -24,7 +24,7 @@ input_dir <- get_arg(
 )
 output_dir <- get_arg(
   "output-dir",
-  file.path(project_root, "outputs", "final_analysis_crib_adult", "results")
+  file.path(project_root, "outputs", "final_analysis_adult", "results")
 )
 batch_index <- as.integer(get_arg("batch-index", Sys.getenv("SLURM_ARRAY_TASK_ID", "0")))
 batch_count <- as.integer(get_arg("batch-count", Sys.getenv("SLURM_ARRAY_TASK_COUNT", "1")))
@@ -60,12 +60,12 @@ longest_run <- function(values, target) {
 
 adult_ids <- bind_rows(
   read_xpt(
-    file.path(project_root, "data", "nhanes-demo-2011-2012.xpt"),
+    file.path(project_root, "data", "nhanes", "nhanes-demo-2011-2012.xpt"),
     col_select = c(SEQN, RIDAGEYR)
   ) |>
     transmute(participant_id = as.character(SEQN), dataset = "2011-2012", age_years = RIDAGEYR),
   read_xpt(
-    file.path(project_root, "data", "nhanes-demo-2013-2014.xpt"),
+    file.path(project_root, "data", "nhanes", "nhanes-demo-2013-2014.xpt"),
     col_select = c(SEQN, RIDAGEYR)
   ) |>
     transmute(participant_id = as.character(SEQN), dataset = "2013-2014", age_years = RIDAGEYR)

@@ -30,7 +30,7 @@ retained runs as predominantly brief classification errors. The boundary rule
 does not distinguish classification error from actual device removal.
 
 The report exports duration summaries and bin counts in `qc/primary_day_rule/`
-and Figure S2 in `figures/final_analysis_crib_adult/`.
+and Figure S2 in `figures/final_analysis_adult/`.
 
 ## Reproduction and preservation
 
@@ -40,7 +40,7 @@ are also preserved on Unity. Earlier different-state results remain under
 `old/nonwear_rule_correction_20260922/`.
 
 Rebuild the method comparison, bout figure, and parameter sensitivity, then
-render with `R/render_crib_primary_report.R`.
+render with `R/render_primary_report.R`.
 The policy identifier is `known_wake_sleep_bounded_nonwear_v3`. The day-rule test
 covers all nine Wake/Sleep/Unknown pairs and rejects all five Unknown pairs,
 plus missing-state and day-edge cases. Downstream guards check the current

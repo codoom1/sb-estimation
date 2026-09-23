@@ -17,9 +17,9 @@ metadata <- get_participant_data("swan", "1h", collect = TRUE) |>
   mutate(ID = as.character(ID), Dataset = as.character(Dataset)) |>
   distinct(ID, Dataset, .keep_all = TRUE)
 age <- bind_rows(
-  read_xpt(file.path(root, "data", "nhanes-demo-2011-2012.xpt"), col_select = c(SEQN, RIDAGEYR)) |>
+  read_xpt(file.path(root, "data", "nhanes", "nhanes-demo-2011-2012.xpt"), col_select = c(SEQN, RIDAGEYR)) |>
     transmute(ID = as.character(SEQN), Dataset = "2011-2012", age = as.integer(RIDAGEYR)),
-  read_xpt(file.path(root, "data", "nhanes-demo-2013-2014.xpt"), col_select = c(SEQN, RIDAGEYR)) |>
+  read_xpt(file.path(root, "data", "nhanes", "nhanes-demo-2013-2014.xpt"), col_select = c(SEQN, RIDAGEYR)) |>
     transmute(ID = as.character(SEQN), Dataset = "2013-2014", age = as.integer(RIDAGEYR))
 )
 metadata <- metadata |> left_join(age, by = c("ID", "Dataset")) |>
@@ -131,13 +131,13 @@ swan <- read_epoch("swan") |>
 nhanes <- read_epoch("nhanes") |>
   filter(!(ID %in% repaired_ids & Dataset == repair_dataset)) |>
   bind_rows(repaired_nhanes_epochs())
-crib_file <- file.path(root, "outputs", "final_analysis", "results", "crib_ppt_df.parquet")
+crib_file <- file.path(root, "data", "upstream", "minute_level_classification.parquet")
 if (!file.exists(crib_file)) stop("Missing CRIB minute parquet: ", crib_file)
 # Use the adopted primary analytic days: complete CRIB-waking days passing
 # the original NHANES within-day non-wear screen, with >=1 day per adult.
 # All methods use the intersection with available complete SWaN/NHANES days.
 crib_retained_file <- file.path(
-  root, "outputs", "final_analysis_crib_adult", "datasets", "primary_daily_sitting.csv"
+  root, "data", "derived", "primary_daily_sitting.csv"
 )
 if (!file.exists(crib_retained_file)) {
   stop("Missing canonical CRIB daily file: ", crib_retained_file, call. = FALSE)
@@ -194,9 +194,9 @@ write_csv(tibble(primary_participants=n_distinct(crib_days$ID,crib_days$Dataset)
 # eligible wrist-accelerometer frame and is then subset to respondents with
 # common eligible days and a valid NHANES self-reported sleep value.
 self_sleep <- bind_rows(
-  read_xpt(file.path(root, "data", "self-sleep-2011-12.xpt"), col_select = c(SEQN, SLD010H)) |>
+  read_xpt(file.path(root, "data", "nhanes", "self-sleep-2011-12.xpt"), col_select = c(SEQN, SLD010H)) |>
     transmute(ID = as.character(SEQN), Dataset = "2011-2012", self_reported_sleep_hours = as.numeric(SLD010H)),
-  read_xpt(file.path(root, "data", "self-sleep-2013-14.xpt"), col_select = c(SEQN, SLD010H)) |>
+  read_xpt(file.path(root, "data", "nhanes", "self-sleep-2013-14.xpt"), col_select = c(SEQN, SLD010H)) |>
     transmute(ID = as.character(SEQN), Dataset = "2013-2014", self_reported_sleep_hours = as.numeric(SLD010H))
 ) |>
   filter(is.finite(self_reported_sleep_hours), !self_reported_sleep_hours %in% c(77, 99))
