@@ -358,6 +358,162 @@ if (apply_primary_day_rule) {
   ci <- confint(sensitivity)
   write_csv(tibble(measure=names(coef(sensitivity)),n=nrow(sensitivity_design$variables),mean_hours=as.numeric(coef(sensitivity)),lower_95=ci[,1],upper_95=ci[,2]),
             file.path(primary_qc_root,"minimum_two_day_sensitivity.csv"))
+
+  excluded_nonwear_values <- primary_selection$audit |>
+    group_by(participant_id, dataset) |>
+    filter(!any(keep_day)) |>
+    summarise(
+      n_complete_wake_days = n(),
+      est_sedentary_hours = mean(sitting_hours),
+      est_waking_hours = mean(wake_hours),
+      est_sleep_hours = 24 - est_waking_hours,
+      est_nonsedentary_hours = est_waking_hours - est_sedentary_hours,
+      est_nonwear_fraction = mean(nonwear_minutes / 1440),
+      .groups = "drop"
+    ) |>
+    transmute(
+      ID = as.character(participant_id), Dataset = as.character(dataset),
+      comparison_group = "Excluded",
+      n_days = n_complete_wake_days,
+      est_sleep_hours, est_sedentary_hours, est_waking_hours,
+      est_nonsedentary_hours, est_nonwear_fraction
+    )
+
+  excluded_zero_wake_values <- read_csv(
+    file.path(
+      primary_qc_root, "upstream_eligibility",
+      "excluded_zero_wake_participants.csv"
+    ),
+    show_col_types = FALSE
+  ) |>
+    transmute(
+      ID = as.character(participant_id), Dataset = as.character(dataset),
+      comparison_group = "Excluded", n_days = n_complete_days,
+      est_sleep_hours = 24, est_sedentary_hours = 0,
+      est_waking_hours = 0, est_nonsedentary_hours = 0,
+      est_nonwear_fraction = 0
+    )
+
+  eligible_nonwear_values <- primary_selection$audit |>
+    filter(keep_day) |>
+    group_by(participant_id, dataset) |>
+    summarise(
+      est_nonwear_fraction = mean(nonwear_minutes / 1440),
+      .groups = "drop"
+    )
+
+  eligible_comparison_values <- analytic_df |>
+    left_join(
+      eligible_nonwear_values,
+      by = c("ID" = "participant_id", "Dataset" = "dataset")
+    ) |>
+    transmute(
+      ID, Dataset, comparison_group = "Eligible", n_days = no_of_valid_days,
+      est_sleep_hours, est_sedentary_hours, est_waking_hours,
+      est_nonsedentary_hours, est_nonwear_fraction
+    )
+
+  comparison_values <- bind_rows(
+    eligible_comparison_values,
+    excluded_nonwear_values,
+    excluded_zero_wake_values
+  ) |>
+    mutate(comparison_group = factor(
+      comparison_group, levels = c("Eligible", "Excluded")
+    ))
+
+  comparison_counts <- comparison_values |>
+    count(comparison_group, name = "n")
+  stopifnot(
+    comparison_counts$n[comparison_counts$comparison_group == "Eligible"] == 9308L,
+    comparison_counts$n[comparison_counts$comparison_group == "Excluded"] == 699L,
+    nrow(excluded_nonwear_values) == 698L,
+    nrow(excluded_zero_wake_values) == 1L,
+    !anyDuplicated(comparison_values[c("ID", "Dataset")])
+  )
+
+  comparison_design_frame <- participant_metadata |>
+    left_join(nhanes_age, by = c("ID", "Dataset")) |>
+    filter(
+      !is.na(Exam_weight_recal), !is.na(PSU), !is.na(Stratum)
+    ) |>
+    left_join(comparison_values, by = c("ID", "Dataset"))
+  comparison_full_design <- svy_design(comparison_design_frame)
+  comparison_design <- subset(comparison_full_design, !is.na(comparison_group))
+  stopifnot(nrow(comparison_design$variables) == 10007L)
+
+  comparison_measures <- c(
+    est_sleep_hours = "Sleep",
+    est_sedentary_hours = "Waking sedentary",
+    est_waking_hours = "Waking",
+    est_nonsedentary_hours = "Waking non-sedentary",
+    est_nonwear_fraction = "Non-wear (% of day)"
+  )
+
+  comparison_estimates <- bind_rows(lapply(names(comparison_measures), function(variable) {
+    group_results <- lapply(levels(comparison_values$comparison_group), function(group) {
+      group_design <- subset(comparison_design, comparison_group == group)
+      estimate <- svymean(as.formula(paste0("~", variable)), group_design, na.rm = TRUE)
+      interval <- confint(estimate)
+      tibble(
+        comparison_group = group,
+        mean_hours = as.numeric(coef(estimate)),
+        lower_95 = interval[1, 1], upper_95 = interval[1, 2]
+      )
+    }) |>
+      bind_rows()
+    difference_fit <- svyglm(
+      as.formula(paste0(variable, " ~ comparison_group")),
+      design = comparison_design
+    )
+    difference_name <- "comparison_groupExcluded"
+    difference_interval <- confint(difference_fit, difference_name)
+    tibble(
+      variable = variable,
+      measure = unname(comparison_measures[[variable]]),
+      eligible_mean = group_results$mean_hours[group_results$comparison_group == "Eligible"],
+      eligible_lower_95 = group_results$lower_95[group_results$comparison_group == "Eligible"],
+      eligible_upper_95 = group_results$upper_95[group_results$comparison_group == "Eligible"],
+      excluded_mean = group_results$mean_hours[group_results$comparison_group == "Excluded"],
+      excluded_lower_95 = group_results$lower_95[group_results$comparison_group == "Excluded"],
+      excluded_upper_95 = group_results$upper_95[group_results$comparison_group == "Excluded"],
+      difference = unname(coef(difference_fit)[difference_name]),
+      difference_lower_95 = difference_interval[1, 1],
+      difference_upper_95 = difference_interval[1, 2]
+    )
+  }))
+
+  comparison_estimates <- comparison_estimates |>
+    mutate(
+      scale = if_else(variable == "est_nonwear_fraction", 100, 1),
+      unit = if_else(variable == "est_nonwear_fraction", "percent of day", "hours/day"),
+      across(
+        c(eligible_mean, eligible_lower_95, eligible_upper_95,
+          excluded_mean, excluded_lower_95, excluded_upper_95,
+          difference, difference_lower_95, difference_upper_95),
+        ~ .x * scale
+      )
+    ) |>
+    select(-scale)
+
+  comparison_table <- comparison_estimates |>
+    transmute(
+      Measure = measure,
+      `Eligible adults (N = 9,308)` = sprintf(
+        "%.2f (%.2f to %.2f)", eligible_mean, eligible_lower_95, eligible_upper_95
+      ),
+      `Excluded adults (N = 699)` = sprintf(
+        "%.2f (%.2f to %.2f)", excluded_mean, excluded_lower_95, excluded_upper_95
+      ),
+      `Difference (excluded − eligible)` = sprintf(
+        "%+.2f (%.2f to %.2f)", difference,
+        difference_lower_95, difference_upper_95
+      )
+    )
+  write_csv(
+    comparison_estimates,
+    file.path(output_root, "tables", "table_excluded_vs_eligible_time_estimates.csv")
+  )
 }
 
 ```
@@ -473,6 +629,25 @@ One adult had no complete days containing CRIB wake minutes; another
 `r comma(flow_nonwear_restricted_excluded)` adults had no days remaining after
 the bounded non-wear screen. This screen allows matching as well as differing
 states on either side of a non-wear run.
+
+```{r excluded-versus-eligible-time-estimates}
+paper_kable(
+  comparison_table,
+  "Survey-weighted time-use and non-wear estimates for eligible and excluded adults. Values are mean (95% CI)."
+)
+```
+
+**Note.** Estimates for the 9,308 eligible adults use days retained by the
+primary eligibility rule. For the 698 adults excluded by the non-wear screen,
+estimates use their complete days containing CRIB wake before that screen was
+applied. The remaining excluded adult had seven complete days with no CRIB wake
+and therefore contributes 24 sleep hours and zero waking, waking sedentary, and
+waking non-sedentary hours per day. Its released-state non-wear fraction was
+zero. Non-wear is each participant's average daily non-wear minutes divided by
+1,440 and is reported as a percentage; its difference is in percentage points.
+All other rows are hours/day. Differences are excluded minus eligible. The
+excluded-group values are diagnostics of records that failed eligibility and
+should not be interpreted as time-use estimates from valid 24-hour days.
 
 Participant-cycles with no eligible day are excluded. Fully asleep hours within
 retained days remain in the hourly analysis and contribute zero waking and
@@ -1888,6 +2063,9 @@ output_index <- bind_rows(output_index,tibble(
   output=c("Figure 5: CRIB parameter sensitivity", "CRIB parameter sensitivity: absolute time estimates"),
   path=c(file.path(figure_root,"figure5_parameter_sensitivity.png"),
          file.path(output_root,"parameter_sensitivity","parameter_sensitivity_weighted_estimates.csv"))))
+output_index <- bind_rows(output_index,tibble(
+  output="Excluded-versus-eligible time and non-wear estimates",
+  path=file.path(output_root,"tables","table_excluded_vs_eligible_time_estimates.csv")))
 stopifnot(all(startsWith(output_index$path, paste0(project_root, .Platform$file.sep))))
 output_index <- output_index |>
   mutate(path = substring(path, nchar(project_root) + 2L))

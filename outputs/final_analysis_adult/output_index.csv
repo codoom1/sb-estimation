@@ -28,3 +28,4 @@ Original NHANES non-wear distribution,outputs/final_analysis_adult/qc/primary_da
 Original versus retained run-length verification,outputs/final_analysis_adult/qc/primary_day_rule/../original_nhanes_nonwear/original_vs_retained_run_lengths.csv
 Figure 5: CRIB parameter sensitivity,figures/final_analysis_adult/figure5_parameter_sensitivity.png
 CRIB parameter sensitivity: absolute time estimates,outputs/final_analysis_adult/parameter_sensitivity/parameter_sensitivity_weighted_estimates.csv
+Excluded-versus-eligible time and non-wear estimates,outputs/final_analysis_adult/tables/table_excluded_vs_eligible_time_estimates.csv
