@@ -442,6 +442,34 @@ if (apply_primary_day_rule) {
   comparison_design <- subset(comparison_full_design, !is.na(comparison_group))
   stopifnot(nrow(comparison_design$variables) == 10007L)
 
+  no_nonwear_values <- primary_selection$audit |>
+    group_by(participant_id, dataset) |>
+    summarise(
+      any_nonwear = any(nonwear_minutes > 0),
+      est_sedentary_hours = mean(sitting_hours),
+      est_waking_hours = mean(wake_hours),
+      est_sleep_hours = 24 - est_waking_hours,
+      est_nonsedentary_hours = est_waking_hours - est_sedentary_hours,
+      est_nonwear_fraction = mean(nonwear_minutes / 1440),
+      .groups = "drop"
+    ) |>
+    filter(!any_nonwear) |>
+    transmute(
+      ID = as.character(participant_id), Dataset = as.character(dataset),
+      est_sleep_hours, est_sedentary_hours, est_waking_hours,
+      est_nonsedentary_hours, est_nonwear_fraction
+    )
+  stopifnot(nrow(no_nonwear_values) == 5723L)
+  no_nonwear_design_frame <- participant_metadata |>
+    left_join(nhanes_age, by = c("ID", "Dataset")) |>
+    filter(!is.na(Exam_weight_recal), !is.na(PSU), !is.na(Stratum)) |>
+    left_join(no_nonwear_values, by = c("ID", "Dataset"))
+  no_nonwear_full_design <- svy_design(no_nonwear_design_frame)
+  no_nonwear_design <- subset(
+    no_nonwear_full_design, !is.na(est_nonwear_fraction)
+  )
+  stopifnot(nrow(no_nonwear_design$variables) == 5723L)
+
   comparison_measures <- c(
     est_sleep_hours = "Sleep",
     est_sedentary_hours = "Waking sedentary",
@@ -462,24 +490,24 @@ if (apply_primary_day_rule) {
       )
     }) |>
       bind_rows()
-    difference_fit <- svyglm(
-      as.formula(paste0(variable, " ~ comparison_group")),
-      design = comparison_design
+    no_nonwear_estimate <- svymean(
+      as.formula(paste0("~", variable)),
+      no_nonwear_design,
+      na.rm = TRUE
     )
-    difference_name <- "comparison_groupExcluded"
-    difference_interval <- confint(difference_fit, difference_name)
+    no_nonwear_interval <- confint(no_nonwear_estimate)
     tibble(
       variable = variable,
       measure = unname(comparison_measures[[variable]]),
       eligible_mean = group_results$mean_hours[group_results$comparison_group == "Eligible"],
       eligible_lower_95 = group_results$lower_95[group_results$comparison_group == "Eligible"],
       eligible_upper_95 = group_results$upper_95[group_results$comparison_group == "Eligible"],
+      no_nonwear_mean = as.numeric(coef(no_nonwear_estimate)),
+      no_nonwear_lower_95 = no_nonwear_interval[1, 1],
+      no_nonwear_upper_95 = no_nonwear_interval[1, 2],
       excluded_mean = group_results$mean_hours[group_results$comparison_group == "Excluded"],
       excluded_lower_95 = group_results$lower_95[group_results$comparison_group == "Excluded"],
-      excluded_upper_95 = group_results$upper_95[group_results$comparison_group == "Excluded"],
-      difference = unname(coef(difference_fit)[difference_name]),
-      difference_lower_95 = difference_interval[1, 1],
-      difference_upper_95 = difference_interval[1, 2]
+      excluded_upper_95 = group_results$upper_95[group_results$comparison_group == "Excluded"]
     )
   }))
 
@@ -489,8 +517,8 @@ if (apply_primary_day_rule) {
       unit = if_else(variable == "est_nonwear_fraction", "percent of day", "hours/day"),
       across(
         c(eligible_mean, eligible_lower_95, eligible_upper_95,
-          excluded_mean, excluded_lower_95, excluded_upper_95,
-          difference, difference_lower_95, difference_upper_95),
+          no_nonwear_mean, no_nonwear_lower_95, no_nonwear_upper_95,
+          excluded_mean, excluded_lower_95, excluded_upper_95),
         ~ .x * scale
       )
     ) |>
@@ -499,15 +527,15 @@ if (apply_primary_day_rule) {
   comparison_table <- comparison_estimates |>
     transmute(
       Measure = measure,
-      `Eligible adults (N = 9,308)` = sprintf(
+      `Adults without any non-wear (N = 5,723)` = sprintf(
+        "%.2f (%.2f to %.2f)", no_nonwear_mean,
+        no_nonwear_lower_95, no_nonwear_upper_95
+      ),
+      `All eligible adults (N = 9,308)` = sprintf(
         "%.2f (%.2f to %.2f)", eligible_mean, eligible_lower_95, eligible_upper_95
       ),
       `Excluded adults (N = 699)` = sprintf(
         "%.2f (%.2f to %.2f)", excluded_mean, excluded_lower_95, excluded_upper_95
-      ),
-      `Difference (excluded − eligible)` = sprintf(
-        "%+.2f (%.2f to %.2f)", difference,
-        difference_lower_95, difference_upper_95
       )
     )
   write_csv(
@@ -633,7 +661,7 @@ states on either side of a non-wear run.
 ```{r excluded-versus-eligible-time-estimates}
 paper_kable(
   comparison_table,
-  "Survey-weighted time-use and non-wear estimates for eligible and excluded adults. Values are mean (95% CI)."
+  "Survey-weighted time-use and non-wear estimates by eligibility and non-wear status. Values are mean (95% CI)."
 )
 ```
 
@@ -644,10 +672,21 @@ applied. The remaining excluded adult had seven complete days with no CRIB wake
 and therefore contributes 24 sleep hours and zero waking, waking sedentary, and
 waking non-sedentary hours per day. Its released-state non-wear fraction was
 zero. Non-wear is each participant's average daily non-wear minutes divided by
-1,440 and is reported as a percentage; its difference is in percentage points.
-All other rows are hours/day. Differences are excluded minus eligible. The
-excluded-group values are diagnostics of records that failed eligibility and
-should not be interpreted as time-use estimates from valid 24-hour days.
+1,440 and is reported as a percentage. All other rows are hours/day. The 5,723
+adults without any non-wear had zero non-wear minutes on every
+complete day containing CRIB wake before eligibility screening. The adult with
+no CRIB waking time is not included in this comparison. Estimates use all
+complete days containing CRIB wake. This group is a subset of the eligible
+sample. The excluded-group values are diagnostics of records that failed
+eligibility and should not be interpreted as time-use estimates from valid
+24-hour days.
+
+Expanding the sample from the 5,723 adults without any non-wear to all 9,308
+eligible adults had little effect on the estimates. Mean waking sedentary time
+was 9.80 and 9.79 hours/day, respectively, while mean sleep, waking, and waking
+non-sedentary time differed by no more than 0.08 hours/day. Thus, including the
+additional eligible participants did not materially change the population
+estimates.
 
 Participant-cycles with no eligible day are excluded. Fully asleep hours within
 retained days remain in the hourly analysis and contribute zero waking and
