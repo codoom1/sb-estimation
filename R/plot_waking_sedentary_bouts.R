@@ -1,10 +1,9 @@
 #!/usr/bin/env Rscript
 
-# Create descriptive waking sedentary-bout summaries for the primary CRIB sample.
+# Plot descriptive waking sedentary-bout summaries for the primary analytic sample.
 # A bout is a consecutive run of CRIB-wake minutes with CHAP sitting fraction
 # >= 0.50. Bouts never continue across participant-day boundaries.
 suppressPackageStartupMessages({
-  library(arrow)
   library(dplyr)
   library(ggplot2)
   library(patchwork)
@@ -12,7 +11,6 @@ suppressPackageStartupMessages({
 })
 
 root <- normalizePath(getwd(), mustWork = TRUE)
-crib_results <- file.path(root, "outputs", "final_analysis", "results")
 adult_root <- file.path(root, "outputs", "final_analysis_adult")
 adult_results <- file.path(adult_root, "results")
 figure_root <- file.path(root, "figures", "final_analysis_adult")
@@ -20,7 +18,6 @@ dir.create(adult_results, recursive = TRUE, showWarnings = FALSE)
 dir.create(figure_root, recursive = TRUE, showWarnings = FALSE)
 
 keys <- c("participant_id", "dataset")
-day_keys <- c(keys, "nhanes_wear_day")
 sedentary_labels <- c("0-6", "6-8", "8-10", "10-12", "12-14", "14+")
 bout_labels <- c("1-10", "11-20", "21-30", "31-40", "41-50", "51+")
 
@@ -42,70 +39,18 @@ participant_time <- eligible_days |>
 eligible_days <- eligible_days |>
   inner_join(participant_time |> select(all_of(keys), sedentary_group), by = keys)
 
-batch_files <- sort(Sys.glob(file.path(crib_results, "crib_ppt_df_batch_*.parquet")))
-if (!length(batch_files)) stop("No CRIB batch parquet files found.")
-
-summarise_batch <- function(path, index) {
-  minute_data <- read_parquet(
-    path,
-    col_select = all_of(c(day_keys, "minute_index", "wake_ind", "chap_sitting_fraction"))
-  ) |>
-    mutate(participant_id = as.character(participant_id), dataset = as.character(dataset)) |>
-    semi_join(eligible_days |> select(all_of(day_keys)), by = day_keys) |>
-    inner_join(eligible_days |> select(all_of(day_keys), sedentary_group), by = day_keys) |>
-    arrange(across(all_of(day_keys)), minute_index) |>
-    group_by(across(all_of(day_keys))) |>
-    mutate(
-      is_sedentary = wake_ind == "wake" & chap_sitting_fraction >= 0.50,
-      new_bout = is_sedentary &
-        (!lag(is_sedentary, default = FALSE) |
-           minute_index != lag(minute_index, default = first(minute_index) - 1L) + 1L),
-      bout_id = cumsum(new_bout)
-    ) |>
-    ungroup()
-
-  result <- minute_data |>
-    filter(is_sedentary) |>
-    group_by(across(all_of(day_keys)), sedentary_group, bout_id) |>
-    summarise(bout_minutes = n(), .groups = "drop") |>
-    group_by(across(all_of(day_keys)), sedentary_group) |>
-    summarise(
-      n_bouts = n(),
-      mean_bout_minutes = mean(bout_minutes),
-      minimum_bout_minutes = min(bout_minutes),
-      maximum_bout_minutes = max(bout_minutes),
-      .groups = "drop"
-    )
-  message("Processed ", index, "/", length(batch_files), " CRIB batches")
-  result
+participant_summary_file <- file.path(
+  adult_results, "sedentary_bout_participant_summary.csv"
+)
+if (!file.exists(participant_summary_file)) {
+  stop("Participant-level sedentary-bout summary was not found.")
 }
-
-daily_bouts <- bind_rows(Map(summarise_batch, batch_files, seq_along(batch_files)))
-stopifnot(!anyDuplicated(daily_bouts[day_keys]))
-
-participant_bouts <- daily_bouts |>
-  group_by(across(all_of(keys)), sedentary_group) |>
-  summarise(
-    days_with_sedentary_bouts = n(),
-    mean_bouts_per_day = mean(n_bouts),
-    mean_daily_bout_minutes = mean(mean_bout_minutes),
-    shortest_daily_mean_bout_minutes = min(mean_bout_minutes),
-    longest_daily_mean_bout_minutes = max(mean_bout_minutes),
-    .groups = "drop"
-  ) |>
-  right_join(participant_time, by = c(keys, "sedentary_group"))
-
-if (anyNA(participant_bouts$mean_daily_bout_minutes)) {
-  stop(sum(is.na(participant_bouts$mean_daily_bout_minutes)),
-       " participants have no waking sedentary bouts.")
-}
-
-participant_bouts <- participant_bouts |>
-  mutate(bout_duration_group = cut(
-    mean_daily_bout_minutes,
-    breaks = c(0, 10, 20, 30, 40, 50, Inf),
-    labels = bout_labels, include.lowest = TRUE, right = TRUE
-  ))
+participant_bouts <- read_csv(participant_summary_file, show_col_types = FALSE) |>
+  mutate(
+    sedentary_group = factor(sedentary_group, levels = sedentary_labels),
+    bout_duration_group = factor(bout_duration_group, levels = bout_labels)
+  )
+stopifnot(nrow(participant_bouts) == nrow(participant_time))
 
 distribution <- participant_bouts |>
   count(bout_duration_group, .drop = FALSE, name = "n_participants") |>
@@ -122,12 +67,15 @@ group_summary <- participant_bouts |>
   )
 
 write_csv(distribution, file.path(adult_results, "sedentary_bout_overall_distribution.csv"))
-write_csv(participant_bouts, file.path(adult_results, "sedentary_bout_participant_summary.csv"))
 write_csv(group_summary, file.path(adult_results, "sedentary_bout_group_summary.csv"))
 
-plot_theme <- theme_minimal(base_size = 15) +
+plot_theme <- theme_minimal(base_size = 18) +
   theme(
-    text = element_text(face = "bold"),
+    text = element_text(face = "bold", colour = "#1A1A1A"),
+    axis.text = element_text(size = 15, colour = "#1A1A1A"),
+    axis.title = element_text(size = 17),
+    plot.title = element_text(size = 19),
+    plot.caption = element_text(size = 13, face = "plain"),
     panel.grid.major.x = element_blank(),
     panel.grid.minor = element_blank(),
     plot.title.position = "plot"
@@ -137,7 +85,7 @@ panel_a <- ggplot(distribution, aes(bout_duration_group, percent_participants)) 
   geom_col(width = 0.68, fill = "#4E79A7", colour = "#17365D", linewidth = 0.8) +
   geom_text(
     aes(label = sprintf("n=%s\n%.1f%%", scales::comma(n_participants), percent_participants)),
-    vjust = -0.25, size = 3.7, fontface = "bold"
+    vjust = -0.25, size = 4.8, fontface = "bold"
   ) +
   scale_y_continuous(expand = expansion(mult = c(0, 0.22))) +
   labs(
@@ -156,7 +104,7 @@ annotation <- sprintf(
 panel_b <- ggplot(participant_bouts, aes(sedentary_group, mean_daily_bout_minutes, fill = sedentary_group)) +
   geom_boxplot(outlier.shape = NA, linewidth = 0.8) +
   annotate("label", x = Inf, y = Inf, label = annotation, hjust = 1.05, vjust = 1.2,
-           size = 3.8, fontface = "bold", fill = "white", colour = "#17365D") +
+           size = 4.5, fontface = "bold", fill = "white", colour = "#17365D") +
   scale_fill_manual(values = c("#DCE8F6", "#BDD7EE", "#9ECAE1", "#6BAED6", "#4292C6", "#2171B5")) +
   coord_cartesian(ylim = c(0, quantile(participant_bouts$mean_daily_bout_minutes, 0.99) * 1.25)) +
   labs(
@@ -169,7 +117,7 @@ panel_b <- ggplot(participant_bouts, aes(sedentary_group, mean_daily_bout_minute
 
 figure <- panel_a + panel_b + plot_layout(widths = c(1, 1))
 ggsave(file.path(figure_root, "figure4_waking_sedentary_bouts.png"), figure,
-       width = 16, height = 6.8, dpi = 700, bg = "white")
+       width = 11.5, height = 6.2, dpi = 600, bg = "white")
 ggsave(file.path(figure_root, "figure4_waking_sedentary_bouts.pdf"), figure,
-       width = 16, height = 6.8, bg = "white")
+       width = 11.5, height = 6.2, bg = "white")
 message("Wrote Figure 4 and sedentary-bout summaries.")

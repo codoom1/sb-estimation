@@ -1751,7 +1751,7 @@ duration was calculated within each retained day and then averaged across days.
 Thus, the figure describes the distribution of participant-average bout
 duration rather than the distribution of raw individual bouts.
 
-```{r figure-4-waking-sedentary-bouts, fig.width=16, fig.height=6.8, out.width="100%"}
+```{r figure-4-waking-sedentary-bouts, fig.width=11.5, fig.height=6.2, out.width="100%"}
 bout_figure_file <- file.path(figure_root, "figure4_waking_sedentary_bouts.png")
 bout_group_file <- file.path(crib_results_dir, "sedentary_bout_group_summary.csv")
 if (!file.exists(bout_figure_file) || !file.exists(bout_group_file)) {
